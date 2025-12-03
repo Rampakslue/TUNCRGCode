@@ -1,0 +1,696 @@
+---
+title: "Phase 2 Aging Processing Code"
+output: html_notebook
+Step: 1
+---
+
+
+#** Libraries and WD **
+```{r}
+#** Load necessary libraries *
+# Using pacman to install and load packages in one step
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  # Original Libraries
+  dplyr,          # For data manipulation
+  tidyr,          # For data tidying
+  openxlsx,       # For reading/writing Excel files
+  lubridate,      # For easier date-time manipulation
+  data.table,     # For efficient data handling, especially rleid
+  pracma,         # For findpeaks
+  GLMMcosinor,    # For generalized linear mixed cosinor models
+  circacompare,   # For comparing circadian rhythms
+  tidyverse,      # A collection of R packages for data science
+  brms,           # For Bayesian regression models using Stan
+  rstanarm,       # For Bayesian models via RStan
+  paletteer,      # Provides a collection of color palettes
+  ggcorrplot,     # For visualizing correlation matrices
+  ggpubr,         # For publication-ready plots
+  corrr,          # For exploring correlations
+  qgraph,         # For network analysis and visualization
+  combinat,       # For combinatorics
+  zoo,            # For ordered time series data
+  caret,          # For classification and regression training
+  janitor,        # For simple data cleaning
+  pwr,            # For power analysis
+  lmPerm,         # For permutation tests for linear models
+  mgcv,            # For permutation tests for GAM
+  pwr,
+  rstatix,
+  hms,
+  fs,
+  car
+  
+)
+
+#** --- Set up a valid path --- *
+# Define base paths for both possible directories
+base_paths <- c(
+  "E:/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging",
+  "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging"
+)
+
+# Find the first existing directory
+valid_path <- first(base_paths[dir.exists(base_paths)])
+
+if (is.na(valid_path)) {
+  stop("Neither of the specified base directories exists. Please check the paths.")
+}
+
+#** --- Define objects to keep --- *
+# This list helps in managing the global environment
+CoreDatasets <- c(
+"CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP", "CorsanoShiftWave", "Variability", "Stability", "SJL", "StatSS", "SLEEP1", "AmpMesAge", "AmpMesGen", "BioBmiStats", "DeviationsS", "SJLDeviations", "SJLBIO", "jsl_summary", "Jetlag", "biolist", "PhysCog", "Aging", "AgingA", "SJL2", "SJLBio"
+)
+
+# Biolist
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+**Processing everything**
+```{r}
+
+# Get list of subject folders using paste0 to build the full path
+if (exists("valid_path")) {
+  subject_folders <- list.dirs(paste0(valid_path, "/Raw"), recursive = FALSE)
+} else {
+  stop("Neither directory exists.")
+}
+
+# Read titles to keep from the text file
+titles_to_keep <- readLines("Keep.txt")
+
+# Define the regular expression pattern to match in the specific titled column
+pattern_to_replace <- "(20..-..-..)(T)(..:..:..\\....-..:..)"
+
+# Define the groups you want to keep
+group_to_keep1 <- 1
+group_to_keep2 <- 3
+
+# Function to load and process each CSV file
+process_csv <- function(file) {
+  cat("Processing file:", file, "\n")  # Print file path
+  
+  tryCatch({
+    df <- read.csv(file)
+    columns_to_remove <- setdiff(names(df), titles_to_keep)
+    df <- df[, !names(df) %in% columns_to_remove, drop = FALSE]
+    names(df)[1] <- "Time"
+    
+    if (any(grepl("^\\d{13}$", df$Time[1]))) { 
+      df$Time <- as.POSIXct(df$Time / 1000, origin = "1970-01-01")
+    } else if (any(grepl(pattern_to_replace, df$Time[1]))) {
+      df$Time <- gsub(pattern_to_replace, paste0("\\", group_to_keep1, " \\", group_to_keep2), df$Time)
+    } else {
+      stop("Unsupported timestamp format in the first column.")
+    }
+
+    df$Time <- ymd_hms(df$Time, tz = "America/Los_Angeles")
+
+    # Only create Day column if the file path contains the word "Activity"
+    if (grepl("Activity", file, ignore.case = TRUE)) {
+      df$Day <- as.Date(df$Time, tz = "America/Los_Angeles")
+    }
+
+    df$Time <- as.numeric(difftime(df$Time, start_date, units = "mins"))
+    return(df)
+  }, error = function(e) {
+    cat("Error processing file:", file, ". Skipping.\n")
+    return(NULL)
+  })
+}
+
+
+# Initialize lists to hold combined data from all subjects
+#all_subjects_data_multi <- list()
+#all_subjects_data_single <- list()
+all_subjects_Analysis_multi <- list()
+all_subjects_Analysis_single <- list()
+#all_subjects_Sleeplineartmp <- list()
+all_subjects_SleepAnalysistmp <- list()
+
+
+# Initialize or load existing processed data
+
+if (exists("processed_subjects")) {
+  processed_subjects <- unique(CorsanoAnalysismulti$Subject)
+} else {
+  processed_subjects <- character(0)
+  CorsanoAnalysissingle <- data.frame()
+  CorsanoAnalysismulti <- data.frame()
+  #CorsanoBioDare2Datafilled <- data.frame()
+  #CorsanoBioDare2Datalinear <- data.frame()
+  #CorsanoDatafilled <- data.frame()
+  #CorsanoDatalinearMulti <- data.frame()
+  #CorsanoDatalinearSingle <- data.frame()
+  SleepAnalysis <- data.frame()
+  #Sleeplinear <- data.frame()
+  }
+
+ 
+# Define base paths for both possible directories
+  subject_base <- c(
+  "E:/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging/Raw/", 
+  "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging/Raw/"
+    )
+  
+#  Setting the template for subject folder starting string
+   subject_path <- subject_base[file.exists(subject_base)][1]
+
+# Check and remove subject if it has already been processed
+for (subject_id in processed_subjects) {
+  
+  # Remove processed subject's folder
+  subject_folders <- gsub(paste0("\\b", subject_path, subject_id, "\\b"), "", subject_folders)
+  subject_folders <- subject_folders[subject_folders != ""]  
+  cat("Patient", subject_id, "already processed. Skipping.\n")
+}
+
+# Iterate over each subject's folder and process the CSV files within
+for (subject_folder in subject_folders) {
+  # Get list of CSV files for the current subject
+  csv_files <- list.files(subject_folder, pattern = "\\.csv$", full.names = TRUE)
+  #csv_files <- csv_files[-1]
+  
+  
+  #**Processing Start and End Date**
+  # Read the first CSV file
+  StartDate <- read.csv(csv_files[1])
+  
+  # Extract the first and last row of the 'date' column
+  StartDate <- StartDate[c(1, nrow(StartDate)), "date", drop = FALSE]
+  
+  # keep only Date data
+  StartDate$date <- gsub(pattern_to_replace, 
+                         paste0("\\", group_to_keep1), 
+                         StartDate$date)
+  
+  # Ensure the StartDate$date column is in POSIXct format
+  StartDate$date <- as.POSIXct(StartDate$date, format = "%Y-%m-%d", tz = "PST8PDT")
+  # Set the time of the first row to "00:00:00"
+  StartDate$date[1] <- as.POSIXct(format(StartDate$date[1], "%Y-%m-%d 00:00:00"), tz = "PST8PDT")
+  # Set the time of the last row to "23:59:59"
+  StartDate$date[2] <- as.POSIXct(format(StartDate$date[2], "%Y-%m-%d 23:59:59"), tz = "PST8PDT")
+
+  # Pull the first and last date from StartDate$date
+  start_date <- min(StartDate$date, na.rm = TRUE)  # na.rm = TRUE handles any NAs
+  end_date <- max(StartDate$date, na.rm = TRUE)
+  
+  
+  
+  #** Processing CSV Files **
+  # Load and process each CSV file into a named list
+  data_list <- lapply(csv_files, process_csv)
+  data_list <- Filter(Negate(is.null), data_list)  # Remove NULL entries
+  
+  if (length(data_list) == 0) {
+    cat("No valid data files found in folder:", subject_folder, ". Skipping.\n")
+    next
+  }
+  
+  # Check if the file titled "workouts" exists
+  workouts_exists <- any(grep("workouts.csv",csv_files, ignore.case = TRUE))
+
+  # Create the names vector conditionally
+  if (workouts_exists) {
+    names_vector <- c("Activity", "Emography","HRV", "Temperature", "RR", "Sleep", "Workouts")
+  } else {
+    names_vector <- c("Activity", "Emography","HRV", "Temperature", "RR", "Sleep")
+  }
+  
+  # Assign names to data_list
+data_list <- setNames(data_list, names_vector)
+
+
+  #**Processing Activity and Workouts**
+
+  # If workouts, combine Activity and Workouts
+  activity <- data_list[["Activity"]]
+  names(activity) <- c("Time", "HR", "Steps", "Energy", "Breath", "Day")
+  
+  if ("Workouts" %in% names(data_list)) {
+    workouts <- data_list[["Workouts"]]
+    names(workouts) <- names(activity)
+    # Combine activity and workouts
+    activity <- bind_rows(activity, workouts)
+  }
+  
+  
+  
+  # Process Multi Day Activity Data
+  activitym <- activity %>%
+    filter((HR >= 30 | Breath >= 6)) %>%
+    mutate(bin_time = floor(Time / 10) * 10) %>%
+    group_by(bin_time) %>%
+    summarise(
+      HR = mean(HR[HR >= 30], na.rm = TRUE),
+      Steps = sum(Steps, na.rm = TRUE),
+      Energy = sum(Energy[Energy != 0], na.rm = TRUE) / 1000,
+      Breath = mean(Breath[Breath >= 6], na.rm = TRUE),
+      Day = min(Day, na.rm = TRUE)
+    ) %>%
+    # *** FIX APPLIED BELOW: Explicitly calling lubridate::wday ***
+    mutate(Day = lubridate::wday(Day, label = TRUE, abbr = FALSE)) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+  
+  # Process Single Day Activity Data
+  activitys <- activity %>%
+    filter((HR >= 30 | Breath >= 6)) %>%
+    mutate(day = floor(Time / 1440),
+           bin_time = Time %% 1440 %/% 10 * 10) %>%
+    group_by(day, bin_time) %>%
+    summarise(
+      HR = mean(HR[HR >= 30], na.rm = TRUE),
+      Steps = sum(Steps, na.rm = TRUE),
+      Energy = sum(Energy[Energy != 0], na.rm = TRUE) / 1000,
+      Breath = mean(Breath[Breath >= 6], na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    group_by(bin_time) %>%
+    summarise(
+      HR = mean(HR[HR >= 30], na.rm = TRUE),
+      Steps = mean(Steps, na.rm = TRUE),
+      Energy = mean(Energy[Energy != 0], na.rm = TRUE),
+      Breath = mean(Breath[Breath >= 6], na.rm = TRUE)
+    ) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+      # Add a 24th hour by copying data from the 0 hour
+      hour_0_data <- activitys %>% filter(Time == 0)
+      hour_24_data <- hour_0_data %>% mutate(Time = 1440)
+      activitys <- bind_rows(activitys, hour_24_data)
+  
+  # Function to replace NULL and NaN with NA
+    replace_nan_with_NA <- function(x) {
+      if(is.null(x)) {
+        return(NA)
+      } else {
+        x[is.nan(x)] <- NA
+        return(x)
+      }
+    }
+  
+  # Replace all NaN with NA
+  activitym <- as.data.frame(lapply(activitym, replace_nan_with_NA))
+  activitys <- as.data.frame(lapply(activitys, replace_nan_with_NA))
+
+  
+  # Sort the data frame by Time
+  Activitym <- activitym[order(activitym$Time),]
+  Activitys <- activitys[order(activitys$Time),]
+
+  
+  #**Processing Temperature**
+
+  temperature <- data_list[["Temperature"]]
+  names(temperature) <- c("Time", "SBT", "CBT")
+  
+  
+  # Process multi-day
+  temperaturem <- temperature %>%
+    filter(between(CBT, 33, 45), between(SBT, 20, 40)) %>%
+    mutate(bin_time = floor(Time / 10) * 10) %>%
+    group_by(bin_time) %>%
+    summarise(SBT = mean(SBT[SBT >= 20], na.rm = TRUE), 
+              CBT = mean(CBT[CBT >= 33], na.rm = TRUE)) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+  
+  # Process single-day
+  temperatures <- temperature %>%
+    filter(between(CBT, 33, 45), between(SBT, 20, 40)) %>%
+    mutate(day = floor(Time / 1440),
+           bin_time = Time %% 1440 %/% 10 * 10) %>%
+    group_by(day, bin_time) %>%
+    summarise(SBT = mean(SBT[SBT >= 20], na.rm = TRUE), 
+              CBT = mean(CBT[CBT >= 33], na.rm = TRUE)) %>%
+    ungroup() %>%
+    group_by(bin_time) %>%
+    summarise(SBT = mean(SBT[SBT >= 20], na.rm = TRUE), 
+              CBT = mean(CBT[CBT >= 33], na.rm = TRUE)) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+    # Add a 24th hour by copying data from the 0 hour
+    hour_0_data <- temperatures %>% filter(Time == 0)
+    hour_24_data <- hour_0_data %>% mutate(Time = 1440)
+    temperatures <- bind_rows(temperatures, hour_24_data)
+    
+  # Replace all NaN with NA
+  temperaturem <- as.data.frame(lapply(temperaturem, replace_nan_with_NA))
+  temperatures <- as.data.frame(lapply(temperatures, replace_nan_with_NA))
+  
+  
+  # Sort the data frame by Time
+  Temperaturem <- temperaturem[order(temperaturem$Time),]
+  Temperatures <- temperatures[order(temperatures$Time),]
+
+  
+  #**Processing RR part**
+  RRR <- data_list[["RR"]]
+  names(RRR) <- c("Time", "RR")
+  
+  
+  # Process multi-day
+  RRRm <- RRR %>%
+    filter(RR > 300 & RR < 3000) %>%
+    mutate(bin_time = floor(Time / 10) * 10) %>%
+    group_by(bin_time) %>%
+    summarise(RR = mean(RR[RR >= 300], na.rm = TRUE)) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+  
+  # Process single-day
+  RRRs <- RRR %>%
+    filter(RR > 300 & RR < 3000) %>%
+    mutate(day = floor(Time / 1440),
+           bin_time = Time %% 1440 %/% 10 * 10) %>%
+    group_by(day, bin_time) %>%
+    summarise(RR = mean(RR[RR >= 300], na.rm = TRUE)) %>%
+    ungroup() %>%
+    group_by(bin_time) %>%
+    summarise(RR = mean(RR[RR >= 300], na.rm = TRUE)) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+    # Add a 24th hour by copying data from the 0 hour
+    hour_0_data <- RRRs %>% filter(Time == 0)
+    hour_24_data <- hour_0_data %>% mutate(Time = 1440)
+    RRRs <- bind_rows(RRRs, hour_24_data)
+    
+    
+  # Replace all NaN with NA
+  RRRm <- as.data.frame(lapply(RRRm, replace_nan_with_NA))
+  RRRs <- as.data.frame(lapply(RRRs, replace_nan_with_NA))
+
+  # Sort the data frame by Time
+  RRRm <- RRRm[order(RRRm$Time),]
+  RRRs <- RRRs[order(RRRs$Time),]
+  
+  
+  
+    #**Processing Emography part**
+  EMO <- data_list[["Emography"]]
+  names(EMO) <- c("Time", "Cortisol", "Stress")
+  
+  
+  # Process multi-day
+  EMOm <- EMO %>%
+    mutate(bin_time = floor(Time / 10) * 10) %>%
+    group_by(bin_time) %>%
+    summarise(Cortisol = mean(Cortisol[Cortisol != 0], na.rm = TRUE),
+              Stress = mean(Stress[Stress != 0], na.rm = TRUE)) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+  
+  # Process single-day
+  EMOs <- EMO %>%
+    mutate(day = floor(Time / 1440),
+           bin_time = Time %% 1440 %/% 10 * 10) %>%
+    group_by(day, bin_time) %>%
+    summarise(Cortisol = mean(Cortisol[Cortisol != 0], na.rm = TRUE),
+              Stress = mean(Stress[Stress != 0], na.rm = TRUE)) %>%
+    ungroup() %>%
+    group_by(bin_time) %>%
+    summarise(Cortisol = mean(Cortisol[Cortisol != 0], na.rm = TRUE),
+              Stress = mean(Stress[Stress != 0], na.rm = TRUE)) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+    # Add a 24th hour by copying data from the 0 hour
+    hour_0_data <- EMOs %>% filter(Time == 0)
+    hour_24_data <- hour_0_data %>% mutate(Time = 1440)
+    EMOs <- bind_rows(EMOs, hour_24_data)
+    
+    
+  # Replace all NaN with NA
+  EMOm <- as.data.frame(lapply(EMOm, replace_nan_with_NA))
+  EMOs <- as.data.frame(lapply(EMOs, replace_nan_with_NA))
+
+  # Sort the data frame by Time
+  EMOm <- EMOm[order(EMOm$Time),]
+  EMOs <- EMOs[order(EMOs$Time),]
+
+  
+  #**Processing HRV part**
+  HD <- data_list[["HRV"]]
+  names(HD) <- c("Time","HRV")
+  
+  # Processing multi-Day
+  HDm <- HD %>%
+  mutate(bin_time = floor(Time / 10) * 10
+         ) %>%
+  group_by(bin_time) %>%
+  summarise(HRV = mean(HRV, na.rm = TRUE)
+            ) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+
+  # Processing Single Day
+  HDs <- HD %>%
+    mutate(day = floor(Time / 1440),
+          bin_time = Time %% 1440 %/% 10 * 10,
+          ) %>%
+    group_by(day, bin_time) %>%
+    summarise(HRV = mean(HRV, na.rm = TRUE)
+            ) %>%
+    ungroup() %>%
+    group_by(bin_time) %>%
+    summarise(HRV = mean(HRV, na.rm = TRUE)
+            ) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+    # Add a 24th hour by copying data from the 0 hour
+    hour_0_data <- HDs %>% filter(Time == 0)
+    hour_24_data <- hour_0_data %>% mutate(Time = 1440)
+    HDs <- bind_rows(HDs, hour_24_data)
+
+
+  # Replace all NaN with NA
+  HDm <- as.data.frame(lapply(HDm, replace_nan_with_NA))
+  HDs <- as.data.frame(lapply(HDs, replace_nan_with_NA))
+  
+
+  # Sort the data frames by Time
+  HRVm <- HDm[order(HDm$Time),]
+  HRVs <- HDs[order(HDs$Time),]
+  
+  
+  #rename the columns
+  names(HRVm) <- c("Time", "HRV")
+  names(HRVs) <- c("Time", "HRV")
+
+  
+  
+#**Processing Sleep*
+  SD <- data_list[["Sleep"]]
+  names(SD) <- c("Time", "Sleep")
+  
+  Sleep <- SD %>%
+    mutate(bin_time = floor(Time / 1) * 1) %>%
+    group_by(bin_time) %>%
+    summarise(Sleep = round(mean(Sleep, na.rm = TRUE))) %>%
+    rename(Time = bin_time) %>%
+    ungroup()
+  
+  # Rename the columns
+  names(Sleep) <- c("Time", "SleepStages")
+  
+
+  
+  #**Combine and clean subject data**
+  
+  # Merge all datasets together
+  Corsanom <- Reduce(function(x, y) merge(x, y, by = "Time", all = TRUE), list(Activitym, HRVm, RRRm, EMOm, Temperaturem))
+  Corsanos <- Reduce(function(x, y) merge(x, y, by = "Time", all = TRUE), list(Activitys, HRVs, RRRs, EMOs, Temperatures))
+
+
+  # Add subject identifier to column names for CorsanoDatalinear
+  subject_id <- basename(subject_folder)
+  
+  #CorsanoDatalinearMultitmp <- Corsanom %>%
+    #rename_with(~ paste(subject_id, .x, sep = " "), -Time)
+
+  #CorsanoDatalinearSingletmp <- Corsanos %>%
+    #rename_with(~ paste(subject_id, .x, sep = " "), -Time)
+  
+  # Add subject identifier and sort for CorsanoAnalysislinear
+  CorsanoAnalysislinearMultitmp <- Corsanom %>%
+    mutate(Subject = subject_id) %>%
+    arrange(Subject, Time)
+  
+  CorsanoAnalysislinearSingletmp <- Corsanos %>%
+    mutate(Subject = subject_id) %>%
+    arrange(Subject, Time)
+  
+  # Store processed data for the current subject
+  #all_subjects_data_multi[[subject_id]] <- CorsanoDatalinearMultitmp
+  all_subjects_Analysis_multi[[subject_id]] <- CorsanoAnalysislinearMultitmp
+  
+  #all_subjects_data_single[[subject_id]] <- CorsanoDatalinearSingletmp
+  all_subjects_Analysis_single[[subject_id]] <- CorsanoAnalysislinearSingletmp  
+
+  
+  #**Finish Processing Sleep Data**
+
+  # Add subject identifier and sort for Sleep
+  SleepAnalysistmp <- Sleep %>%
+    mutate(Subject = subject_id) %>%
+    arrange(Subject, Time)
+
+  # Add subject identifier to column names for Sleep
+  #Sleeplineartmp <- Sleep %>%
+   # rename_with(~ paste(subject_id, .x, sep = " "), -Time)
+  
+
+  # Store processed data for the Sleep
+  #all_subjects_Sleeplineartmp[[subject_id]] <- Sleeplineartmp
+  all_subjects_SleepAnalysistmp[[subject_id]] <- SleepAnalysistmp
+
+}
+
+#** If there is no new data to process, skip this next part **
+if (!is.null(subject_folder)) {
+
+    # Combine data from all subjects into single datasets
+    #CorsanoDatalinearMultitmp <- Reduce(function(x, y) merge(x, y, by = "Time", all = TRUE, all.x = TRUE),
+     #                                      all_subjects_data_multi)
+    CorsanoAnalysislinearMultitmp <- bind_rows(all_subjects_Analysis_multi)
+    
+    #CorsanoDatalinearSingletmp <- Reduce(function(x, y) merge(x, y, by = "Time", all = TRUE, all.x = TRUE),
+     #                                     all_subjects_data_single)
+    CorsanoAnalysislinearSingletmp <- bind_rows(all_subjects_Analysis_single)
+    
+    
+    #Sleeplineartmp <- Reduce(function(x, y) merge(x, y, by = "Time", all = TRUE, all.x = TRUE),
+     #                           all_subjects_Sleeplineartmp)
+    SleepAnalysistmp <- bind_rows(all_subjects_SleepAnalysistmp)
+    
+    
+    #** Finally Finish Processing Sleep Data **
+    
+        # Ensure continuous time values from min to max for Sleeplineartmp
+      #Sleeplineartmp <- Sleeplineartmp %>%
+       # complete(Time = seq(min(Time), 10079, by = 1), fill = list(SleepStages = 1))
+      
+      #Sleeplineartmp <- Sleeplineartmp[order(Sleeplineartmp$Time),]
+      
+      # Replace NA and 0 in Sleep Stages with 1
+      #Sleeplineartmp <- Sleeplineartmp %>%
+       # mutate(across(-Time, ~ ifelse(is.na(.) | . == 0, 1, .)))
+    
+      SleepAnalysistmp$SleepStages[SleepAnalysistmp$SleepStages == 0] <- 1
+      
+      # Flip the sleep stage values
+      #Sleeplineartmp <- Sleeplineartmp %>%
+       # mutate(across(-Time, ~ dplyr::recode(., `4` = 3, `3` = 2, `2` = 1, `1` = 4)))
+      
+      SleepAnalysistmp$SleepStages <- dplyr::recode(SleepAnalysistmp$SleepStages, `4` = 3, `3` = 2, `2` = 1, `1` = 4)
+    
+    
+    # Cleaning Function for Sleep
+    #** Interpolate short gaps **
+    
+    # Create filled version of datasets
+    #CorsanoDatafilledtmp <- CorsanoDatalinearMultitmp
+    
+    
+    # Interpolating CorsanoData
+    #CorsanoDatafilledtmp[-1] <- lapply(CorsanoDatafilledtmp[-1], function(column) {
+     # zoo::na.approx(column, x = CorsanoDatafilledtmp$Time, na.rm = FALSE, rule = 1, maxgap = 6)
+     # })
+    
+    
+    #**Exporting cleaned data**
+    
+    # Create CorsanoAnalysis
+    CorsanoAnalysismultitmp <- CorsanoAnalysislinearMultitmp
+    CorsanoAnalysissingletmp <- CorsanoAnalysislinearSingletmp
+    
+    # Create CorsanoBioDare2 dataset
+    #CorsanoBioDare2Datalineartmp <- CorsanoDatalinearMultitmp
+    #CorsanoBioDare2Datafilledtmp <- CorsanoDatafilledtmp
+    
+    
+    # Convert minutes into days
+    #CorsanoDatalinearMultitmp$Time <- CorsanoDatalinearMultitmp$Time / 1440
+     # names(CorsanoDatalinearMultitmp)[1] <- "Time (days)"
+      
+    #CorsanoDatafilledtmp$Time <- CorsanoDatafilledtmp$Time / 1440
+     # names(CorsanoDatafilledtmp)[1] <- "Time (days)"
+    
+      
+    # Convert minutes into hours for Analysis file
+    CorsanoAnalysismultitmp$Time <- CorsanoAnalysismultitmp$Time / 60
+      names(CorsanoAnalysismultitmp)[1] <- "Time"
+      
+    CorsanoAnalysissingletmp$Time <- CorsanoAnalysissingletmp$Time / 60
+      names(CorsanoAnalysismultitmp)[1] <- "Time"
+    
+    
+    #Sleeplineartmp$Time <- Sleeplineartmp$Time / 1440
+    
+
+    # Creating BioDare Data by converting minutes into hours
+    #CorsanoBioDare2Datalineartmp$Time <- CorsanoBioDare2Datalineartmp$Time / 60
+    #CorsanoBioDare2Datafilledtmp$Time <- CorsanoBioDare2Datafilledtmp$Time / 60
+    
+  #** Combine new data with existing data **
+    # Append newly processed data to the existing dataset
+    CorsanoAnalysissingle <- bind_rows(CorsanoAnalysissingle, CorsanoAnalysissingletmp)
+    CorsanoAnalysismulti <- bind_rows(CorsanoAnalysismulti, CorsanoAnalysismultitmp)
+    #CorsanoBioDare2Datafilled <- bind_rows(CorsanoBioDare2Datafilled, CorsanoBioDare2Datafilledtmp)
+    #CorsanoBioDare2Datalinear <- bind_rows(CorsanoBioDare2Datalinear, CorsanoBioDare2Datalineartmp)
+    #CorsanoDatafilled <- bind_rows(CorsanoDatafilled, CorsanoDatafilledtmp)
+    #CorsanoDatalinearMulti <- bind_rows(CorsanoDatalinearMulti, CorsanoDatalinearMultitmp)
+    #CorsanoDatalinearSingle <- bind_rows(CorsanoDatalinearSingle, CorsanoDatalinearSingletmp)
+    SleepAnalysis <- bind_rows(SleepAnalysis, SleepAnalysistmp)
+    #Sleeplinear <- bind_rows(Sleeplinear, Sleeplineartmp)
+    
+} else {}
+ 
+
+
+#** Exporting Data**
+
+      # Define the file paths
+      file_paths <- c("CorsanoAnalysismulti", "CorsanoAnalysissingle", "SleepAnalysis")
+  
+      # If a valid path is found, write the files
+          if (!is.null(valid_path)) {
+            for (file_name in file_paths) {
+              if (exists(file_name)) {
+                write.xlsx(get(file_name), paste0(valid_path, "/Outputs/", file_name, ".xlsx"), rowNames = FALSE, firstRow = TRUE)
+              } else {
+                warning(paste("The object", file_name, "does not exist in the environment. Skipping."))
+              }
+            }
+          } else {
+            stop("Neither directory exists.")
+          }
+
+
+  # Update the list of processed subjects
+  processed_subjects <- unique(CorsanoAnalysissingle$Subject)
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+
+```
+
+
+
+

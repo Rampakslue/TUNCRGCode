@@ -1,0 +1,1372 @@
+---
+title: "Phase 2 Misc Stats"
+output: html_notebook
+Step: 5
+---
+
+
+#**================================================================**
+#** Libraries and Environment Setup                  **
+#**================================================================**
+```{r}
+#** Load necessary libraries *
+# Using pacman to install and load packages in one step
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  # Original Libraries
+  dplyr,          # For data manipulation
+  tidyr,          # For data tidying
+  openxlsx,       # For reading/writing Excel files
+  lubridate,      # For easier date-time manipulation
+  data.table,     # For efficient data handling, especially rleid
+  pracma,         # For findpeaks
+  GLMMcosinor,    # For generalized linear mixed cosinor models
+  circacompare,   # For comparing circadian rhythms
+  tidyverse,      # A collection of R packages for data science
+  brms,           # For Bayesian regression models using Stan
+  rstanarm,       # For Bayesian models via RStan
+  paletteer,      # Provides a collection of color palettes
+  ggcorrplot,     # For visualizing correlation matrices
+  ggpubr,         # For publication-ready plots
+  corrr,          # For exploring correlations
+  qgraph,         # For network analysis and visualization
+  combinat,       # For combinatorics
+  zoo,            # For ordered time series data
+  caret,          # For classification and regression training
+  janitor,        # For simple data cleaning
+  pwr,            # For power analysis
+  lmPerm,         # For permutation tests for linear models
+  mgcv,            # For permutation tests for GAM
+  pwr,
+  rstatix,
+  hms,
+  fs,
+  car
+  
+)
+
+#** --- Set up a valid path --- *
+# Define base paths for both possible directories
+base_paths <- c(
+  "E:/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging",
+  "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging"
+)
+
+# Find the first existing directory
+valid_path <- first(base_paths[dir.exists(base_paths)])
+
+if (is.na(valid_path)) {
+  stop("Neither of the specified base directories exists. Please check the paths.")
+}
+
+#** --- Define objects to keep --- *
+# This list helps in managing the global environment
+CoreDatasets <- c(
+"CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP", "CorsanoShiftWave", "Variability", "Stability", "SJL", "StatSS", "SLEEP1", "AmpMesAge", "AmpMesGen", "BioBmiStats", "DeviationsS", "SJLDeviations", "SJLBIO", "jsl_summary", "Jetlag", "biolist", "PhysCog", "Aging", "AgingA", "SJL2", "SJLBio"
+)
+
+# Biolist
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+#** Are the CBT rhythms statistically different **#
+```{r}
+Comp1 <- CorsanoAnalysismulti %>%
+  filter(Subject == c("BWFD6Z76","A32VTWXQ"),
+         Day != c("Sunday", "Saturday"))
+
+Comp2 <- CorsanoAnalysismulti %>%
+  filter(Subject == c("BWFD6Z76","RJ43K3DS"),
+         Day != c("Sunday", "Saturday"))
+
+
+Comp3 <- CorsanoAnalysismulti %>%
+  filter(Subject == c("RJ43K3DS","A32VTWXQ"),
+         Day != c("Sunday", "Saturday"))
+
+
+
+results <- circacompare(
+  x = Comp1,
+  col_time = "Time",
+  col_group = "Subject",
+  col_outcome = "CBT",
+  period = 24
+)
+
+results1 <- circacompare(
+  x = Comp2,
+  col_time = "Time",
+  col_group = "Subject",
+  col_outcome = "CBT",
+  period = 24
+)
+
+results2 <- circacompare(
+  x = Comp3,
+  col_time = "Time",
+  col_group = "Subject",
+  col_outcome = "CBT",
+  period = 24
+)
+
+
+
+results3 <- circacompare(
+  x = Comp1,
+  col_time = "Time",
+  col_group = "Subject",
+  col_outcome = "Steps",
+  period = 24
+)
+
+results4 <- circacompare(
+  x = Comp2,
+  col_time = "Time",
+  col_group = "Subject",
+  col_outcome = "Steps",
+  period = 24
+)
+
+results5 <- circacompare(
+  x = Comp3,
+  col_time = "Time",
+  col_group = "Subject",
+  col_outcome = "Steps",
+  period = 24
+)
+
+
+results
+results1
+results2
+results3
+results4
+results5
+```
+
+
+
+
+
+
+
+
+#** Quick Export**
+```{r}
+export_path <- paste0(valid_path, "/Stats/StatsWide.xlsx")
+          write.xlsx(Statistics, export_path, rowNames = FALSE, firstRow = TRUE)
+```
+
+
+
+
+```{r}
+StatSSS <- StatSS %>%
+ mutate(TPhase = ifelse(TPhase > 12, TPhase - 24, TPhase))
+
+
+# --- STEP 1: Identify the duplicates (Optional but recommended) ---
+# Run this block to SEE which patients have duplicate entries causing the error
+duplicates <- StatSS %>%
+  filter(week == "Weekday") %>%       # Look only at the data you care about
+  count(Patient, week, Bio) %>%       # Count occurrences
+  filter(n > 1)                       # Keep only those appearing more than once
+
+print("The following patients have duplicate entries:")
+
+
+#*** Positive TPhase ***
+# --- STEP 2: The Corrected Pipeline ---
+Statistics <- StatSS %>%
+  # FIX 1: Filter BEFORE pivoting. 
+  filter(week == "Weekday") %>%
+   
+  # Rename columns
+  rename(amp = Amplitude, mesor = Mesor) %>%
+   
+  # Select columns
+  select(Patient, week, Bio, amp, mesor, PPhase, TPhase, MAD, L, O, E, D, R, S, F, I, FI1, FI2) %>%
+   
+  # FIX 2: Remove exact duplicates
+  distinct() %>% 
+  
+  # FIX 2.5: Remove NAs from Bio (NEW ADDITION)
+  # This ensures you don't get columns named "NA_amp" or "NA_mesor"
+  drop_na(Bio) %>%
+   
+  # FIX 3: Pivot Wider with a safety aggregation
+  pivot_wider(
+    id_cols = c(Patient, week, MAD, L, O, E, D, R, S, F, I, FI1, FI2), 
+    names_from = Bio, 
+    values_from = c(amp, mesor, PPhase, TPhase), 
+    names_glue = "{Bio}{.value}",
+    
+    # FIX 4: Handle remaining duplicates
+    values_fn = mean 
+  )
+
+
+#*** Negative TPhase ***
+# --- STEP 2: The Corrected Pipeline ---
+StatisticsS <- StatSSS %>%
+  # FIX 1: Filter BEFORE pivoting. 
+  filter(week == "Weekday") %>%
+   
+  # Rename columns
+  rename(amp = Amplitude, mesor = Mesor) %>%
+   
+  # Select columns
+  select(Patient, week, Bio, amp, mesor, PPhase, TPhase, MAD, L, O, E, D, R, S, F, I, FI1, FI2) %>%
+   
+  # FIX 2: Remove exact duplicates
+  distinct() %>% 
+  
+  # FIX 2.5: Remove NAs from Bio (NEW ADDITION)
+  # This ensures you don't get columns named "NA_amp" or "NA_mesor"
+  drop_na(Bio) %>%
+   
+  # FIX 3: Pivot Wider with a safety aggregation
+  pivot_wider(
+    id_cols = c(Patient, week, MAD, L, O, E, D, R, S, F, I, FI1, FI2), 
+    names_from = Bio, 
+    values_from = c(amp, mesor, PPhase, TPhase), 
+    names_glue = "{Bio}{.value}",
+    
+    # FIX 4: Handle remaining duplicates
+    values_fn = mean 
+  )
+
+
+
+```
+
+
+```{r}
+# 1. Create a function to Identify outliers
+# This calculates the 25th and 75th percentiles
+is_outlier <- function(x) {
+  return(x < quantile(x, 0.25, na.rm = TRUE) - 1.5 * IQR(x, na.rm = TRUE) | 
+         x > quantile(x, 0.75, na.rm = TRUE) + 1.5 * IQR(x, na.rm = TRUE))
+}
+
+# 2. Create a clean version of the data
+# We filter out rows where EITHER EnergyTPhase OR CBTTPhase are outliers
+StatisticsS <- StatisticsS %>%
+  filter(!is_outlier(EnergyTPhase) & !is_outlier(CBTTPhase) & !is_outlier(HRVTPhase) & !is_outlier(BreathTPhase))
+```
+
+
+
+
+#** Mid point of sleep/activity vs midpoint/low of CBT**#
+```{r}
+#*** Positive TPhase ***
+# --- STEP 2: The Corrected Pipeline ---
+StatisticsA <- StatSS %>%
+  # FIX 1: Filter BEFORE pivoting. 
+  filter(week == "Weekday",
+         Bio == "CBT")
+   
+
+#** Amplitude Energy vs CBT
+cor.test(StatisticsA$midrange, StatisticsA$MP)
+summary(lm(midrange ~ MP, data = StatisticsA))
+ggscatter(StatisticsA, x = "MP", y = "midrange", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "mid point of sleep", ylab = "average nadir")
+```
+
+
+
+
+
+
+#*** CBT, Energy, Activity Amplitude **
+```{r}
+#** Amplitude Energy vs CBT
+cor.test(Statistics$Energyamp, Statistics$CBTamp)
+summary(lm(Energyamp ~ CBTamp, data = Statistics))
+ggscatter(Statistics, x = "CBTamp", y = "Energyamp", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "CBT Amplitude", ylab = "Energy Amplitude")
+
+
+
+#** Amplitude CBT vs Steps
+cor.test(Statistics$Stepsamp, Statistics$CBTamp)
+summary(lm(Stepsamp ~ CBTamp, data = Statistics))
+ggscatter(Statistics, x = "CBTamp", y = "Stepsamp", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "CBT Amplitude", ylab = "Activity Amplitude")
+
+
+
+#*** CBT, Energy, Activity Phase **
+
+
+#** Amplitude Energy vs Steps **
+cor.test(Statistics$EnergyPPhase, Statistics$StepsPPhase)
+summary(lm(EnergyPPhase ~ StepsPPhase, data = Statistics))
+
+ggscatter(Statistics, x = "StepsPPhase", y = "EnergyPPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Activity Peak Phase", ylab = "Energy Peak Phase")
+
+
+cor.test(StatisticsS$EnergyTPhase, StatisticsS$StepsTPhase)
+summary(lm(EnergyTPhase ~ StepsTPhase, data = StatisticsS))
+ggscatter(StatisticsS, x = "StepsTPhase", y = "EnergyTPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Activity Trouph Phase", ylab = "Energy Trouph Phase")
+
+
+
+
+#** Amplitude Energy vs CBT **
+cor.test(Statistics$EnergyPPhase, Statistics$CBTPPhase)
+summary(lm(EnergyPPhase ~ CBTPPhase, data = Statistics))
+ggscatter(Statistics, x = "CBTPPhase", y = "EnergyPPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "CBT Peak Phase", ylab = "Energy Peak Phase")
+
+
+cor.test(StatisticsS$EnergyTPhase, StatisticsS$CBTTPhase)
+summary(lm(EnergyTPhase ~ CBTTPhase, data = StatisticsS))
+ggscatter(StatisticsS, x = "CBTTPhase", y = "EnergyTPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "CBT Trouph Phase", ylab = "Energy Trouph Phase")
+
+
+
+#** Amplitude CBT vs Steps **
+cor.test(Statistics$StepsPPhase, Statistics$CBTPPhase)
+summary(lm(StepsPPhase ~ CBTPPhase, data = Statistics))
+
+ggscatter(Statistics, x = "CBTPPhase", y = "StepsPPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "CBT Peak Phase", ylab = "Activity Peak Phase")
+
+
+
+cor.test(StatisticsS$StepsTPhase, StatisticsS$CBTTPhase)
+summary(lm(StepsTPhase ~ CBTTPhase, data = StatisticsS))
+
+ggscatter(StatisticsS, x = "CBTTPhase", y = "StepsTPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "CBT Trouph Phase", ylab = "Activity Trouph Phase")
+```
+
+
+
+
+
+#*** HRV, Energy, Activity ***
+```{r}
+
+#*** HRV, CBT, Energy, Activity Amplitude **
+
+#* HRV vs CBT *#
+cor.test(Statistics$CBTamp, Statistics$HRVamp)
+summary(lm(CBTamp ~ HRVamp, data = Statistics))
+
+ggscatter(Statistics, x = "HRVamp", y = "CBTamp", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Amplitude", ylab = "CBT Amplitude")
+
+
+#* HRV vs Energy *#
+cor.test(Statistics$Energyamp, Statistics$HRVamp)
+summary(lm(Energyamp ~ HRVamp, data = Statistics))
+
+ggscatter(Statistics, x = "HRVamp", y = "Energyamp", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Amplitude", ylab = "Energy Amplitude")
+
+
+#* HRV vs Activity *#
+cor.test(Statistics$Stepsamp, Statistics$HRVamp)
+summary(lm(Stepsamp ~ HRVamp, data = Statistics))
+
+ggscatter(Statistics, x = "HRVamp", y = "Stepsamp", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Amplitude", ylab = "Activity Amplitude")
+
+
+
+#*** HRV, CBT, Energy, Activity Phase**
+
+#* HRV vs CBT *#
+cor.test(Statistics$CBTPPhase, Statistics$HRVPPhase)
+summary(lm(CBTPPhase ~ HRVPPhase, data = Statistics))
+ggscatter(Statistics, x = "HRVPPhase", y = "CBTPPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Peak Phase", ylab = "CBT Peak Phase")
+
+
+cor.test(StatisticsS$CBTTPhase, StatisticsS$HRVTPhase)
+summary(lm(CBTTPhase ~ HRVTPhase, data = StatisticsS))
+ggscatter(StatisticsS, x = "HRVTPhase", y = "CBTTPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Trouph Phase", ylab = "CBT Trouph Phase")
+
+
+
+
+#* HRV vs Energy *#
+cor.test(Statistics$EnergyPPhase, Statistics$HRVPPhase)
+summary(lm(EnergyPPhase ~ HRVPPhase, data = Statistics))
+ggscatter(Statistics, x = "HRVPPhase", y = "EnergyPPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Peak Phase", ylab = "Energy Peak Phase")
+
+
+cor.test(StatisticsS$EnergyTPhase, StatisticsS$HRVTPhase)
+summary(lm(EnergyTPhase ~ HRVTPhase, data = StatisticsS))
+ggscatter(StatisticsS, x = "HRVTPhase", y = "EnergyTPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Trouph Phase", ylab = "Energy Trouph Phase")
+
+
+
+#* HRV vs Activity *#
+cor.test(Statistics$StepsPPhase, Statistics$HRVPPhase)
+summary(lm(StepsPPhase ~ HRVPPhase, data = Statistics))
+ggscatter(Statistics, x = "HRVPPhase", y = "StepsPPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Peak Phase", ylab = "Activity Peak Phase")
+
+
+cor.test(StatisticsS$StepsTPhase, StatisticsS$HRVTPhase)
+summary(lm(StepsTPhase ~ HRVTPhase, data = StatisticsS))
+ggscatter(StatisticsS, x = "HRVTPhase", y = "StepsTPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "HRV Trouph Phase", ylab = "Activity Trouph Phase")
+
+```
+
+
+
+
+
+#*** Breath, CBT, Energy, Activity ***#
+```{r}
+
+#*** Breath, CBT, Energy, Activity Amplitude **
+
+#* Breath vs CBT *#
+cor.test(Statistics$CBTamp, Statistics$Breathamp)
+summary(lm(CBTamp ~ Breathamp, data = Statistics))
+
+ggscatter(Statistics, x = "Breathamp", y = "CBTamp", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Respiratory Rate Amplitude", ylab = "CBT Amplitude")
+
+
+#* Breath vs Energy *#
+cor.test(Statistics$Energyamp, Statistics$Breathamp)
+summary(lm(Energyamp ~ Breathamp, data = Statistics))
+
+ggscatter(Statistics, x = "Breathamp", y = "Energyamp", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+         xlab = "Respiratory Rate Amplitude", ylab = "Energy Amplitude")
+
+
+#* Breath vs Activity *#
+cor.test(Statistics$Stepsamp, Statistics$Breathamp)
+summary(lm(Stepsamp ~ Breathamp, data = Statistics))
+
+ggscatter(Statistics, x = "Breathamp", y = "Stepsamp", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Respiratory Rate Amplitude", ylab = "Activity Amplitude")
+
+
+
+#*** Breath, CBT, Energy, Activity Phase**
+
+#* Breath vs CBT *#
+cor.test(Statistics$CBTPPhase, Statistics$BreathPPhase)
+summary(lm(CBTPPhase ~ BreathPPhase, data = Statistics))
+ggscatter(Statistics, x = "BreathPPhase", y = "CBTPPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Breath Peak Phase", ylab = "CBT Peak Phase")
+
+
+cor.test(StatisticsS$CBTTPhase, StatisticsS$BreathTPhase)
+summary(lm(CBTTPhase ~ BreathTPhase, data = StatisticsS))
+ggscatter(StatisticsS, x = "BreathTPhase", y = "CBTTPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Respiratory Rate Trouph Phase", ylab = "CBT Trouph Phase")
+
+
+
+#* Breath vs Activity *#
+cor.test(Statistics$StepsPPhase, Statistics$BreathPPhase)
+summary(lm(StepsPPhase ~ BreathPPhase, data = Statistics))
+ggscatter(Statistics, x = "BreathPPhase", y = "StepsPPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Respiratory Rate Peak Phase", ylab = "Activity Peak Phase")
+
+
+cor.test(StatisticsS$StepsTPhase, StatisticsS$BreathTPhase)
+summary(lm(StepsTPhase ~ BreathTPhase, data = StatisticsS))
+ggscatter(StatisticsS, x = "BreathTPhase", y = "StepsTPhase", 
+          add = "reg.line", conf.int = TRUE, 
+          add.params = list(color = "blue", fill = "darkgray"),
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Respiratory Rate Trouph Phase", ylab = "Activity Trouph Phase")
+
+```
+
+
+
+
+#*** Social Jetlag ***
+```{r}
+# Create a separate dataframe for this analysis, filtering for only Weekday and Weekend
+# Add age group stratification
+SJLA <- SJL %>%
+  filter(week %in% c("Weekday", "Weekend")) %>%
+  mutate(age_group = cut(age,
+                         breaks = c(19, 40, 70, Inf),
+                         labels = c("20-40", "41-70", "71+"),
+                         include.lowest = TRUE))
+
+# Helper Function: Calculate Circular Difference (Absolute)
+calculate_phase_difference <- function(phase1, phase2, cycle_length = 24) {
+  diff <- abs(phase1 - phase2)
+  pmin(diff, cycle_length - diff)
+}
+
+
+#==============================================================================
+# Step 1 & 2: Calculate and Stratify Social Jetlag
+#==============================================================================
+cat("--- Step 1 & 2: Calculating and stratifying Social Jetlag ---\n")
+
+sjl_summary <- SJLA %>%
+  group_by(patient, week) %>%
+  summarise(mean_mp = mean(p_phase, na.rm = TRUE), .groups = 'drop') %>%
+  pivot_wider(names_from = week, values_from = mean_mp) %>%
+  filter(!is.na(Weekday) & !is.na(Weekend)) %>%
+  mutate(PhaseDev = calculate_phase_difference(Weekday, Weekend)) %>%
+  mutate(sjl_severity = cut(PhaseDev,
+                            breaks = c(-Inf, 1, 2, Inf),
+                            labels = c("Mild (0-1h)", "Moderate (1-2h)", "Severe (2+h)"),
+                            right = TRUE)) %>%
+  select(patient, PhaseDev, sjl_severity)
+
+# Add age group information to the main summary table
+patient_info <- SJLA %>% distinct(patient, age_group)
+sjl_summary <- inner_join(sjl_summary, patient_info, by = "patient")
+
+cat("Social Jetlag summary created for", nrow(sjl_summary), "patients.\n")
+
+
+#==============================================================================
+# NEW: Histogram of Social Jetlag Distribution
+#==============================================================================
+cat("\n--- Generating Histogram of Phase Deviations ---\n")
+
+# Assumes valid_path exists, otherwise uses getwd()
+if(!exists("valid_path")) valid_path <- getwd()
+images_output_dir <- file.path(valid_path, "Stats", "Images", "Jetlag")
+if (!dir.exists(images_output_dir)) dir.create(images_output_dir, recursive = TRUE)
+
+# Generate Histogram
+hist_plot <- ggplot(sjl_summary, aes(x = PhaseDev)) +
+  geom_histogram(binwidth = 0.5, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(aes(xintercept = mean(PhaseDev, na.rm=TRUE)), color="red", linetype="dashed", size=1) +
+  labs(title = "Distribution of Social Jetlag (Phase Deviation)",
+       subtitle = paste("Mean deviation:", round(mean(sjl_summary$PhaseDev, na.rm=TRUE), 2), "hours"),
+       x = "Phase Deviation (Hours)",
+       y = "Count of Patients") +
+  theme_minimal()
+
+# Save Histogram
+ggsave(file.path(images_output_dir, "SJL_Distribution_Histogram.png"), 
+       plot = hist_plot, width = 8, height = 6, bg = "white")
+
+print(hist_plot)
+cat("Histogram saved.\n")
+
+
+#==============================================================================
+# Step 3: Evaluate Weekday vs. Weekend Rhythm Changes
+#==============================================================================
+cat("\n--- Step 3: Calculating rhythm changes from Weekday to Weekend ---\n")
+
+rhythm_changes_by_bio <- SJLA %>%
+  group_by(patient, week, bio) %>%
+  summarise(across(c(amplitude, mesor), ~mean(.x, na.rm = TRUE)), .groups = 'drop') %>%
+  pivot_wider(names_from = week, values_from = c(amplitude, mesor)) %>%
+  filter(if_all(starts_with(c("amplitude_", "mesor_")), ~!is.na(.))) %>%
+  mutate(
+    amplitude_directed_change = ((amplitude_Weekend - amplitude_Weekday) / amplitude_Weekday) * 100,
+    amplitude_magnitude_change = abs(amplitude_directed_change)
+  )
+
+overall_amplitude_changes <- rhythm_changes_by_bio %>%
+  group_by(patient) %>%
+  summarise(
+    overall_amplitude_directed_change = mean(amplitude_directed_change, na.rm = TRUE),
+    overall_amplitude_magnitude_change = mean(amplitude_magnitude_change, na.rm = TRUE)
+  )
+
+#==============================================================================
+# Main Analysis Loop (Modified for Boxplots + Significance Only)
+#==============================================================================
+cat("\n--- Generating Boxplots with Significance ---\n")
+
+results_list <- list()
+analysis_groups <- c("Overall", levels(SJLA$age_group))
+
+# Define comparisons for the significance brackets
+# These must match your 'labels' in the cut function exactly
+my_comparisons <- list( 
+  c("Mild (0-1h)", "Moderate (1-2h)"), 
+  c("Moderate (1-2h)", "Severe (2+h)"), 
+  c("Mild (0-1h)", "Severe (2+h)") 
+)
+
+for(group in analysis_groups) {
+  
+  # Filter data for the current group
+  if (group == "Overall") {
+    current_sjl_summary <- sjl_summary
+  } else {
+    current_sjl_summary <- sjl_summary %>% filter(age_group == group)
+  }
+  
+  # Check for sufficient data
+  if(nrow(current_sjl_summary) < 3) {
+    next 
+  }
+  
+  # Join data
+  analysis_data <- inner_join(current_sjl_summary, overall_amplitude_changes, by = "patient")
+  
+  # --- Visualization: Boxplot with Significance ---
+  
+  # Create Boxplot
+  # Note: method = "t.test" or "wilcox.test" can be used. 
+  # "p.signif" gives asterisks (*), "p.format" gives numbers.
+  plot_stratified_overall <- ggplot(analysis_data, aes(x = sjl_severity, y = overall_amplitude_magnitude_change, fill = sjl_severity)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) + # Hide outliers if adding jitter, otherwise keep
+    geom_jitter(width = 0.2, alpha = 0.3) + # Adds points to show data distribution
+    stat_compare_means(comparisons = my_comparisons, method = "t.test", label = "p.signif") + # Adds the brackets
+    stat_compare_means(label.y = max(analysis_data$overall_amplitude_magnitude_change) * 1.1) + # Adds global p-value
+    labs(title = paste("Overall Amplitude Change by SJL Severity -", group), 
+         x = "SJL Group", 
+         y = "Overall Amplitude Change Mag. (%)") +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  print(plot_stratified_overall)
+  
+  # Export the plot
+  plot_filename_overall <- paste0("Boxplot_SJL_vs_Amp_", gsub("[^A-Za-z0-9]+", "_", group), ".png")
+  ggsave(
+    file.path(images_output_dir, plot_filename_overall),
+    plot = plot_stratified_overall,
+    width = 8, height = 6, dpi = 300, bg = "white"
+  )
+  cat(" > Boxplot saved for group:", group, "\n")
+  
+  # --- Statistics (Keep ANOVA for the Excel sheet) ---
+  anova_overall <- aov(overall_amplitude_magnitude_change ~ sjl_severity, data = analysis_data)
+  anova_summary <- summary(anova_overall)
+  
+  # Power calculation
+  ss_between <- anova_summary[[1]]["sjl_severity", "Sum Sq"]
+  ss_within <- anova_summary[[1]]["Residuals", "Sum Sq"]
+  f2 <- ss_between / ss_within
+  power_anova_overall <- pwr.f2.test(u = anova_summary[[1]]["sjl_severity", "Df"], 
+                                     v = anova_summary[[1]]["Residuals", "Df"], 
+                                     f2 = f2, sig.level = 0.05)$power
+  
+  results_list[[length(results_list) + 1]] <- data.frame(
+    age_group = group, 
+    biometric = "Overall", 
+    test_type = "ANOVA", 
+    p_value = anova_summary[[1]][1, "Pr(>F)"], 
+    estimate = anova_summary[[1]][1, "F value"], 
+    power = power_anova_overall
+  )
+}
+
+
+cat("\n--- Analysis Complete ---\n")
+rm(list = setdiff(ls(), CoreDatasets))
+
+```
+
+
+
+#** Variability **#
+```{r}
+#==============================================================================
+# NEW: Histogram of Variability (MAD) Distribution
+#==============================================================================
+
+StatSJL <- StatSS %>%
+  select(Patient, week, MAD) %>%
+  filter(week == "Weekday") %>%
+  distinct(Patient, .keep_all=TRUE)
+
+
+# Generate Histogram
+hist_plot <- ggplot(StatSJL, aes(x = MAD)) +
+  geom_histogram(binwidth = 10, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(aes(xintercept = mean(MAD, na.rm=TRUE)), color="red", linetype="dashed", size=1) +
+  labs(title = "Distribution of Circadian Stability (Mean Absolute Deviation)",
+       subtitle = paste("Mean deviation:", round(mean(StatSJL$MAD, na.rm=TRUE), 2), "minutes"),
+       x = "Phase Deviation (Minutes)",
+       y = "Count of Patients") +
+  theme_minimal()
+
+# Save Histogram
+#ggsave(file.path(images_output_dir, "SJL_Distribution_Histogram.png"), 
+ #      plot = hist_plot, width = 8, height = 6, bg = "white")
+
+print(hist_plot)
+```
+
+#** Variability **#
+```{r}
+#==============================================================================
+# NEW: Histogram of Variability (MAD) Distribution
+#==============================================================================
+
+StatSJL <- StatSS %>%
+  select(Patient, week, MAD, age) %>%
+  filter(week == "Weekday") %>%
+  distinct(Patient, .keep_all=TRUE) %>%
+  filter(age < 40)
+
+
+# Generate Histogram
+hist_plot <- ggplot(StatSJL, aes(x = MAD)) +
+  geom_histogram(binwidth = 10, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(aes(xintercept = mean(MAD, na.rm=TRUE)), color="red", linetype="dashed", size=1) +
+  labs(title = "Distribution of Circadian Stability (Mean Absolute Deviation)",
+       subtitle = paste("Mean deviation:", round(mean(StatSJL$MAD, na.rm=TRUE), 2), "minutes"),
+       x = "Phase Deviation (Minutes)",
+       y = "Count of Patients") +
+  theme_minimal()
+
+# Save Histogram
+#ggsave(file.path(images_output_dir, "SJL_Distribution_Histogram.png"), 
+ #      plot = hist_plot, width = 8, height = 6, bg = "white")
+
+print(hist_plot)
+```
+
+
+
+
+
+
+```{r}
+
+unique(CorsanoAnalysismulti$Subject)
+
+Subject3 <- "WJAQEYA8"
+```
+
+
+```{r}
+# ==========================================
+# 1. Load and Filter Data
+# ==========================================
+# Assuming 'CorsanoAnalysismulti' is loaded in your R environment
+df <- CorsanoAnalysismulti %>%
+  filter(Subject == Subject3)
+
+# DATA CHECK:
+if("Steps" %in% names(df)) {
+  # Renaming Energy to activity for consistency
+  df <- rename(df, activity = Energy)
+} else {
+  stop("Column 'Steps' not found. Please ensure the dataframe has a 'Steps' column.")
+}
+
+# ==========================================
+# 1.1 Calculate and Subtract Baseline (NEW STEP)
+# ==========================================
+# Calculate the average baseline of Energy across the whole dataset
+avg_baseline <- mean(df$activity, na.rm = TRUE)
+
+# Subtract the baseline from the activity.
+# pmax(0, ...) ensures that if activity < baseline, the result is 0 (no negative bars)
+df <- df %>%
+  mutate(activity_adjusted = pmax(0, activity - avg_baseline))
+
+# ==========================================
+# 2. Data Processing for Double Plotting
+# ==========================================
+# Logic Update:
+# The 'Time' column is cumulative (e.g., 27.0 = 3 AM on Day 2).
+
+actigram_data <- df %>%
+  mutate(
+    # Ensure Time is numeric
+    raw_time = as.numeric(Time),
+    
+    # Calculate Day Index: 
+    day_index = floor(raw_time / 24) + 1,
+    
+    # Calculate Time of Day (0-24h):
+    time_hours = raw_time %% 24
+  ) 
+
+# ==========================================
+# 2.1 Normalize Day Index
+# ==========================================
+# If the dataset starts on Day 5, shift it back to Day 1.
+min_day <- min(actigram_data$day_index, na.rm = TRUE)
+
+if (min_day > 1) {
+  actigram_data$day_index <- actigram_data$day_index - (min_day - 1)
+}
+
+# Create the "Left" panel (Day N, 0-24 hours)
+left_panel <- actigram_data %>%
+  mutate(plot_x = time_hours,
+         plot_y = day_index)
+
+# Create the "Right" panel (Day N+1, 24-48 hours)
+right_panel <- actigram_data %>%
+  mutate(plot_x = time_hours + 24,
+         plot_y = day_index - 1) %>%
+  filter(plot_y >= 1)
+
+# Combine them into one plotting dataset
+plot_df <- bind_rows(left_panel, right_panel)
+
+# ==========================================
+# 3. Plotting with ggplot2
+# ==========================================
+
+ggplot(plot_df, aes(x = plot_x, y = plot_y)) +
+  geom_rect(aes(
+    xmin = plot_x, 
+    xmax = plot_x + 0.25, # Adjust based on data frequency (e.g., 0.25 for 15 mins)
+    
+    # --- UPDATED LOGIC HERE ---
+    # We use 'activity_adjusted' instead of 'activity'.
+    # This means the bars only represent energy EXCEEDING the average.
+    ymin = plot_y - (activity_adjusted / max(activity_adjusted, na.rm = TRUE)) * 1, 
+    ymax = plot_y 
+  ), fill = "black") +
+  
+  scale_y_reverse(
+    breaks = unique(plot_df$plot_y),
+    labels = paste("Day", unique(plot_df$plot_y))
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 48, by = 6),
+    labels = c("00:00", "06:00", "12:00", "18:00", "00:00", "06:00", "12:00", "18:00", "00:00"),
+    limits = c(0, 48)
+  ) +
+  
+  theme_bw() +
+  labs(
+    title = "Double-Plotted Actigram (Baseline Corrected)",
+    subtitle = paste("Showing 48-hour window. Baseline Energy threshold:", round(avg_baseline, 2)),
+    x = "Time of Day (Hours)",
+    y = "Relative Day"
+  ) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80") 
+  ) +
+  geom_vline(xintercept = 24, linetype = "dashed", color = "red", alpha = 0.5)
+```
+
+
+
+##** Actigram
+```{r}
+
+# ==========================================
+# 1. Load and Filter Data
+# ==========================================
+# Assuming 'CorsanoAnalysismulti' is loaded in your R environment
+df <- CorsanoAnalysismulti %>%
+  filter(Subject == Subject3)
+
+# DATA CHECK:
+if("Steps" %in% names(df)) {
+  df <- rename(df, activity = Steps)
+} else {
+  stop("Column 'Steps' not found. Please ensure the dataframe has a 'Steps' column.")
+}
+
+# ==========================================
+# 2. Data Processing for Double Plotting
+# ==========================================
+# Logic Update:
+# The 'Time' column is cumulative (e.g., 27.0 = 3 AM on Day 2).
+# We need to extract the 0-24h time and the Day Index mathematically.
+
+actigram_data <- df %>%
+  mutate(
+    # Ensure Time is numeric
+    raw_time = as.numeric(Time),
+    
+    # Calculate Day Index: 
+    # Time 0-24 is Day 1, 24-48 is Day 2, etc.
+    # floor(raw_time / 24) gives 0 for Day 1, 1 for Day 2. We add 1 to make it 1-based.
+    day_index = floor(raw_time / 24) + 1,
+    
+    # Calculate Time of Day (0-24h):
+    # Use modulo operator %% to get the remainder after dividing by 24.
+    time_hours = raw_time %% 24
+  ) 
+
+# ==========================================
+# 2.1 Normalize Day Index
+# ==========================================
+# If the dataset starts on Day 5 (e.g., hours start > 96), this shifts it back to start at Day 1.
+min_day <- min(actigram_data$day_index, na.rm = TRUE)
+
+if (min_day > 1) {
+  # Subtract (X - 1) from all values so the sequence starts at 1
+  actigram_data$day_index <- actigram_data$day_index - (min_day - 1)
+}
+
+# Create the "Left" panel (Day N, 0-24 hours)
+left_panel <- actigram_data %>%
+  mutate(plot_x = time_hours,
+         plot_y = day_index)
+
+# Create the "Right" panel (Day N+1, 24-48 hours)
+# We shift the time by +24, and shift the 'day association' back by 1.
+# This means data from Day 2 (Day Index 2) will appear on Day 1's row (Plot Y 1), but at hours 24-48.
+right_panel <- actigram_data %>%
+  mutate(plot_x = time_hours + 24,
+         plot_y = day_index - 1) %>%
+  filter(plot_y >= 1)
+
+# Combine them into one plotting dataset
+plot_df <- bind_rows(left_panel, right_panel)
+
+# ==========================================
+# 3. Plotting with ggplot2
+# ==========================================
+
+ggplot(plot_df, aes(x = plot_x, y = plot_y)) +
+  geom_rect(aes(
+    xmin = plot_x, 
+    xmax = plot_x + 0.25, # Width of ~15 min interval. Adjust if your data frequency differs.
+    # To make bars go "UP" visually on a reversed Y-axis, we must SUBTRACT height from the baseline
+    ymin = plot_y - (activity / max(activity, na.rm = TRUE)) * 1.5, 
+    ymax = plot_y 
+  ), fill = "black") +
+  
+  scale_y_reverse(
+    breaks = unique(plot_df$plot_y),
+    labels = paste("Day", unique(plot_df$plot_y))
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 48, by = 6),
+    labels = c("00:00", "06:00", "12:00", "18:00", "00:00", "06:00", "12:00", "18:00", "00:00"),
+    limits = c(0, 48)
+  ) +
+  
+  theme_bw() +
+  labs(
+    title = "Double-Plotted Actigram",
+    subtitle = "Showing 48-hour window per row (Time cumulative)",
+    x = "Time of Day (Hours)",
+    y = "Relative Day"
+  ) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80") 
+  ) +
+  geom_vline(xintercept = 24, linetype = "dashed", color = "red", alpha = 0.5)
+
+```
+
+
+
+#** Actigram with overlay
+```{r}
+# ==========================================
+# 1. Load and Filter Data
+# ==========================================
+df <- CorsanoAnalysismulti %>%
+  filter(Subject == "BWFD6Z76")
+
+# DATA CHECK: Steps
+if("Steps" %in% names(df)) {
+  df <- rename(df, activity = Steps)
+} else {
+  stop("Column 'Steps' not found.")
+}
+
+# DATA CHECK: CBT (Red)
+if("CBT" %in% names(df)) {
+  df <- rename(df, temp = CBT)
+} else {
+  warning("Column 'CBT' not found. Creating empty column.")
+  df$temp <- NA
+}
+
+# DATA CHECK: HR (Blue)
+if("HR" %in% names(df)) {
+  df <- rename(df, hr = HR)
+  # Treat 0 as missing data so the line breaks instead of dipping
+  df$hr[df$hr == 0] <- NA
+} else {
+  warning("Column 'HR' not found. Creating empty column.")
+  df$hr <- NA
+}
+
+# DATA CHECK: HRV (Green)
+if("HRV" %in% names(df)) {
+  df <- rename(df, hrv = HRV)
+} else {
+  warning("Column 'HRV' not found. Creating empty column.")
+  df$hrv <- NA
+}
+
+# DATA CHECK: Breath (Purple)
+if("Breath" %in% names(df)) {
+  df <- rename(df, breath = Breath)
+} else {
+  warning("Column 'Breath' not found. Creating empty column.")
+  df$breath <- NA
+}
+
+# ==========================================
+# 2. Data Processing for Double Plotting
+# ==========================================
+
+actigram_data <- df %>%
+  mutate(
+    raw_time = as.numeric(Time),
+    day_index = floor(raw_time / 24) + 1,
+    time_hours = raw_time %% 24
+  ) 
+
+# ==========================================
+# 2.1 Normalize Day Index
+# ==========================================
+min_day <- min(actigram_data$day_index, na.rm = TRUE)
+if (min_day > 1) {
+  actigram_data$day_index <- actigram_data$day_index - (min_day - 1)
+}
+
+# ==========================================
+# 2.2 Calculate Scaling Factors
+# ==========================================
+# We need global min/max to normalize the data to fit inside the rows (0-1 height)
+max_act <- max(actigram_data$activity, na.rm = TRUE)
+
+# CBT Scaling
+min_temp <- min(actigram_data$temp, na.rm = TRUE)
+max_temp <- max(actigram_data$temp, na.rm = TRUE)
+temp_range <- max_temp - min_temp
+if (is.na(temp_range) || temp_range == 0) temp_range <- 1 
+
+# HR Scaling
+#min_hr <- min(actigram_data$hr, na.rm = TRUE)
+min_hr <- 50
+max_hr <- max(actigram_data$hr, na.rm = TRUE)
+hr_range <- max_hr - min_hr
+if (is.na(hr_range) || hr_range == 0) hr_range <- 1 
+
+# HRV Scaling
+min_hrv <- min(actigram_data$hrv, na.rm = TRUE)
+max_hrv <- max(actigram_data$hrv, na.rm = TRUE)
+hrv_range <- max_hrv - min_hrv
+if (is.na(hrv_range) || hrv_range == 0) hrv_range <- 1 
+
+# Breath Scaling
+min_breath <- min(actigram_data$breath, na.rm = TRUE)
+max_breath <- max(actigram_data$breath, na.rm = TRUE)
+breath_range <- max_breath - min_breath
+if (is.na(breath_range) || breath_range == 0) breath_range <- 1 
+
+# ==========================================
+# 2.3 Create Panels
+# ==========================================
+
+# Create the "Left" panel (Day N, 0-24 hours)
+left_panel <- actigram_data %>%
+  mutate(plot_x = time_hours,
+         plot_y = day_index)
+
+# Create the "Right" panel (Day N+1, 24-48 hours)
+# Shift time by +24, shift day index back by 1
+right_panel <- actigram_data %>%
+  mutate(plot_x = time_hours + 24,
+         plot_y = day_index - 1) %>%
+  filter(plot_y >= 1)
+
+# Combine
+plot_df <- bind_rows(left_panel, right_panel)
+
+# ==========================================
+# 3. Plotting with ggplot2
+# ==========================================
+
+ggplot(plot_df, aes(x = plot_x, y = plot_y)) +
+  # 1. Activity Bars (Black)
+  geom_rect(aes(
+    xmin = plot_x, 
+    xmax = plot_x + 0.25, 
+    ymin = plot_y - (activity / max_act) * 0.9, 
+    ymax = plot_y 
+  ), fill = "black") + # Added alpha to bars to make lines more visible
+  
+  # 2. CBT Line (Red)
+  geom_line(aes(
+    group = plot_y,
+    y = plot_y - ((temp - min_temp) / temp_range) * 0.9
+  ), color = "red", size = 0.6, alpha = 0.8) +
+
+  # 3. HR Line (Blue)
+  geom_line(aes(
+    group = plot_y,
+    y = plot_y - ((hr - min_hr) / hr_range) * 1.25
+  ), color = "blue", size = 0.6, alpha = 0.8) +
+
+  # 4. HRV Line (Green)
+#  geom_line(aes(
+#    group = plot_y,
+#    y = plot_y - ((hrv - min_hrv) / hrv_range) * 0.9
+#  ), color = "green", size = 0.6, alpha = 0.8) +
+
+  # 5. Breath Line (Purple)
+#  geom_line(aes(
+#    group = plot_y,
+#    y = plot_y - ((breath - min_breath) / breath_range) * 0.9
+#  ), color = "purple", size = 0.6, alpha = 0.8) +
+  
+  scale_y_reverse(
+    breaks = unique(plot_df$plot_y),
+    labels = paste("Day", unique(plot_df$plot_y))
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 48, by = 6),
+    labels = c("00:00", "06:00", "12:00", "18:00", "00:00", "06:00", "12:00", "18:00", "00:00"),
+    limits = c(0, 48)
+  ) +
+  
+  theme_bw() +
+  labs(
+    title = "Double-Plotted Actigram with Overlays",
+    #subtitle = "Bars=Steps | Red=CBT | Blue=HR | Green=HRV | Purple=Breath (All Normalized)",
+    subtitle = "Bars=Steps | Red=CBT | Blue=HR (All Normalized)",
+    x = "Time of Day (Hours)",
+    y = "Relative Day"
+  ) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80") 
+  ) +
+  geom_vline(xintercept = 24, linetype = "dashed", color = "black", alpha = 0.3)
+```
+
+
+
+
+
+
+
+
+
+##** Actigram cbt
+```{r}
+
+# ==========================================
+# 1. Load and Filter Data
+# ==========================================
+# Assuming 'CorsanoAnalysismulti' is loaded in your R environment
+df <- CorsanoAnalysismulti %>%
+  filter(Subject == "BWFD6Z76")
+
+# DATA CHECK:
+if("CBT" %in% names(df)) {
+  df <- rename(df, activity = CBT)
+} else {
+  stop("Column 'CBT' not found. Please ensure the dataframe has the correct column.")
+}
+
+# ==========================================
+# NEW STEP: Set Minimum CBT to Zero
+# ==========================================
+# Calculate the minimum value in the dataset (ignoring NAs)
+cbt_min <- min(df$activity, na.rm = TRUE)
+
+# Subtract the minimum from the activity column
+# Now, the lowest temperature in the dataset will be 0
+df$activity <- df$activity - cbt_min
+
+# ==========================================
+# 2. Data Processing for Double Plotting
+# ==========================================
+# Logic Update:
+# The 'Time' column is cumulative (e.g., 27.0 = 3 AM on Day 2).
+# We need to extract the 0-24h time and the Day Index mathematically.
+
+actigram_data <- df %>%
+  mutate(
+    # Ensure Time is numeric
+    raw_time = as.numeric(Time),
+    
+    # Calculate Day Index: 
+    # Time 0-24 is Day 1, 24-48 is Day 2, etc.
+    # floor(raw_time / 24) gives 0 for Day 1, 1 for Day 2. We add 1 to make it 1-based.
+    day_index = floor(raw_time / 24) + 1,
+    
+    # Calculate Time of Day (0-24h):
+    # Use modulo operator %% to get the remainder after dividing by 24.
+    time_hours = raw_time %% 24
+  ) 
+
+# ==========================================
+# 2.1 Normalize Day Index
+# ==========================================
+# If the dataset starts on Day 5 (e.g., hours start > 96), this shifts it back to start at Day 1.
+min_day <- min(actigram_data$day_index, na.rm = TRUE)
+
+if (min_day > 1) {
+  # Subtract (X - 1) from all values so the sequence starts at 1
+  actigram_data$day_index <- actigram_data$day_index - (min_day - 1)
+}
+
+# Create the "Left" panel (Day N, 0-24 hours)
+left_panel <- actigram_data %>%
+  mutate(plot_x = time_hours,
+         plot_y = day_index)
+
+# Create the "Right" panel (Day N+1, 24-48 hours)
+# We shift the time by +24, and shift the 'day association' back by 1.
+# This means data from Day 2 (Day Index 2) will appear on Day 1's row (Plot Y 1), but at hours 24-48.
+right_panel <- actigram_data %>%
+  mutate(plot_x = time_hours + 24,
+         plot_y = day_index - 1) %>%
+  filter(plot_y >= 1)
+
+# Combine them into one plotting dataset
+plot_df <- bind_rows(left_panel, right_panel)
+
+# ==========================================
+# 3. Plotting with ggplot2
+# ==========================================
+
+ggplot(plot_df, aes(x = plot_x, y = plot_y)) +
+  geom_rect(aes(
+    xmin = plot_x, 
+    xmax = plot_x + 0.25, # Width of ~15 min interval. Adjust if your data frequency differs.
+    # To make bars go "UP" visually on a reversed Y-axis, we must SUBTRACT height from the baseline.
+    # Since we zeroed the min, 'activity' is now the delta from the lowest temp.
+    # We normalize by the NEW max (which is the Range of the original data).
+    ymin = plot_y - (activity / max(activity, na.rm = TRUE)) * 0.9, 
+    ymax = plot_y 
+  ), fill = "black") +
+  
+  scale_y_reverse(
+    breaks = unique(plot_df$plot_y),
+    labels = paste("Day", unique(plot_df$plot_y))
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 48, by = 6),
+    labels = c("00:00", "06:00", "12:00", "18:00", "00:00", "06:00", "12:00", "18:00", "00:00"),
+    limits = c(0, 48)
+  ) +
+  
+  theme_bw() +
+  labs(
+    title = "Double-Plotted Actigram (CBT Normalized)",
+    subtitle = "Zero baseline = Minimum recorded CBT",
+    x = "Time of Day (Hours)",
+    y = "Relative Day"
+  ) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80") 
+  ) +
+  geom_vline(xintercept = 24, linetype = "dashed", color = "red", alpha = 0.5)
+
+```
+
+
+
+
+
+
+
+#** Chronotype **
+```{r}
+
+
+
+
+```
+
+
+
+

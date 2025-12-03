@@ -1,0 +1,791 @@
+---
+title: "Phase 2 Aging Stats Export"
+output: html_notebook
+Step: 2
+---
+
+#**================================================================**
+#** Libraries and Environment Setup                  **
+#**================================================================**
+```{r}
+#** Load necessary libraries *
+# Using pacman to install and load packages in one step
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  # Original Libraries
+  dplyr,          # For data manipulation
+  tidyr,          # For data tidying
+  openxlsx,       # For reading/writing Excel files
+  lubridate,      # For easier date-time manipulation
+  data.table,     # For efficient data handling, especially rleid
+  pracma,         # For findpeaks
+  GLMMcosinor,    # For generalized linear mixed cosinor models
+  circacompare,   # For comparing circadian rhythms
+  tidyverse,      # A collection of R packages for data science
+  brms,           # For Bayesian regression models using Stan
+  rstanarm,       # For Bayesian models via RStan
+  paletteer,      # Provides a collection of color palettes
+  ggcorrplot,     # For visualizing correlation matrices
+  ggpubr,         # For publication-ready plots
+  corrr,          # For exploring correlations
+  qgraph,         # For network analysis and visualization
+  combinat,       # For combinatorics
+  zoo,            # For ordered time series data
+  caret,          # For classification and regression training
+  janitor,        # For simple data cleaning
+  pwr,            # For power analysis
+  lmPerm,         # For permutation tests for linear models
+  mgcv,            # For permutation tests for GAM
+  pwr,
+  rstatix,
+  hms,
+  fs,
+  car
+  
+)
+
+#** --- Set up a valid path --- *
+# Define base paths for both possible directories
+base_paths <- c(
+  "E:/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging",
+  "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging"
+)
+
+# Find the first existing directory
+valid_path <- first(base_paths[dir.exists(base_paths)])
+
+if (is.na(valid_path)) {
+  stop("Neither of the specified base directories exists. Please check the paths.")
+}
+
+#** --- Define objects to keep --- *
+# This list helps in managing the global environment
+CoreDatasets <- c(
+"CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP", "CorsanoShiftWave", "Variability", "Stability", "SJL", "StatSS", "SLEEP1", "AmpMesAge", "AmpMesGen", "BioBmiStats", "DeviationsS", "SJLDeviations", "SJLBIO", "jsl_summary", "Jetlag", "biolist", "PhysCog", "Aging", "AgingA", "SJL2", "SJLBio"
+)
+
+# Biolist
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+#**================================================================**
+#** CORE PROCESSING CODE                                           **
+#**================================================================**
+```{r}
+
+#**================================================================**
+#** 2. Helper Functions                                            **
+#**================================================================**
+
+#' Replace NaN and NULL values with NA.
+#' @param x A vector or column.
+#' @return A vector with NaN/NULL replaced by NA.
+replace_nan_with_NA <- function(x) {
+  if(is.null(x)) {
+    return(NA)
+  } else {
+    x[is.nan(x)] <- NA
+    return(x)
+  }
+}
+
+#' Summarize biomarker data by specified grouping variables.
+#' Matches the logic of explicitly writing out mean/SEM for every variable.
+#' ROBUST VERSION: Checks for existence of columns before processing.
+#' @param data A dataframe.
+#' @param group_vars A character vector of column names to group by.
+#' @return A summarized and ungrouped dataframe.
+summarize_biomarkers <- function(data, group_vars) {
+  
+  # Identify standard biomarkers (excluding Energy) that ACTUALLY exist in the data
+  available_cols <- names(data)
+  std_bios <- intersect(biolist[biolist != "Energy"], available_cols)
+  
+  # 1. Base summary for standard biomarkers
+  res <- data %>%
+    group_by(across(all_of(group_vars))) %>%
+    summarise(
+      across(
+        all_of(std_bios),
+        list(
+          mean = ~mean(.x, na.rm = TRUE),
+          SEM = ~sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))
+        ),
+        .names = "{.col}{.fn}" # Output names like HRmean, HRSEM
+      ),
+      .groups = 'drop'
+    )
+  
+  # 2. Special handling for Energy (only if it exists in data)
+  if ("Energy" %in% available_cols) {
+    energy_res <- data %>%
+      group_by(across(all_of(group_vars))) %>%
+      summarise(
+        Energy_mean = mean(Energy[Energy != 0], na.rm = TRUE),
+        Energy_SEM = sd(Energy[Energy != 0], na.rm = TRUE) / sqrt(sum(!is.na(Energy[Energy != 0]))),
+        .groups = 'drop'
+      )
+    # Join Energy results back to main result
+    res <- left_join(res, energy_res, by = group_vars)
+  }
+  
+  # 3. Clean up column names
+  res %>%
+    rename_with(~sub("_mean$", "", .), ends_with("_mean")) %>%
+    rename_with(~sub("_SEM$", "SEM", .), ends_with("_SEM"))
+}
+
+#**================================================================**
+#** 3. Data Preparation & Aggregation                              **
+#**================================================================**
+
+# --- Prepare Weekday/Weekend Split ---
+CorsanoAnalysissplit <- CorsanoAnalysismulti %>%
+  mutate(Week = ifelse(Day %in% c("Saturday", "Sunday"), "Weekend", "Weekday")) %>%
+  # Convert and merge into 24-hour format, kept within the same day
+  mutate(Time = Time %% 24,
+         Time = trunc(Time * 1000) / 1000) %>%
+  arrange(Subject, Week, Time)
+
+# Duplicate rows where Time == 0, change Time to 24, and add them back
+# This ensures continuous plotting at the midnight crossover
+CorsanoAnalysissplit <- CorsanoAnalysissplit %>%
+  bind_rows(CorsanoAnalysissplit %>%
+              filter(Time == 0) %>%
+              mutate(Time = 24)) %>%
+  arrange(Subject, Week, Time)
+
+# --- Create Aggregated Datasets using Helper Function ---
+
+# 1. Combined by Weekday/Weekend
+CorsanoAnalysisCombined <- summarize_biomarkers(CorsanoAnalysissplit, c("Time", "Subject", "Week")) %>%
+  ungroup() %>%
+  arrange(Subject, Week, Time)
+
+# 2. Combined for the whole week (Both)
+# We calculate this from the source multi data to ensure correct weighting
+CorsanoAnalysisBoth <- CorsanoAnalysismulti %>%
+  mutate(Time = Time %% 24,
+         Time = trunc(Time * 1000) / 1000) %>%
+  select(-Day) %>%
+  # Use the helper function here too, just grouping by Subject and Time
+  summarize_biomarkers(c("Time", "Subject")) %>%
+  mutate(Week = "Both") %>%
+  ungroup() %>%
+  arrange(Subject, Time)
+
+# --- Final Cleanup and Combination ---
+# Apply replace_nan_with_NA to all datasets
+CorsanoAnalysissplit <- CorsanoAnalysissplit %>% mutate(across(everything(), replace_nan_with_NA))
+CorsanoAnalysisCombined <- CorsanoAnalysisCombined %>% mutate(across(everything(), replace_nan_with_NA))
+CorsanoAnalysisBoth <- CorsanoAnalysisBoth %>% mutate(across(everything(), replace_nan_with_NA))
+
+# Ensure Both dataset has correct column order before binding
+CorsanoAnalysisBoth <- CorsanoAnalysisBoth %>%
+  select(Time, Subject, Week, everything())
+
+# Create Final Combined Dataset
+CorsanoAnalysisAll <- bind_rows(CorsanoAnalysisBoth, CorsanoAnalysisCombined) %>%
+  arrange(Subject, Time)
+
+# --- Export Processed Data ---
+file_paths <- c("CorsanoAnalysissplit", "CorsanoAnalysisAll")
+
+if (!is.null(valid_path)) {
+  for (file_name in file_paths) {
+    write.xlsx(get(file_name), file.path(valid_path, "Outputs", paste0(file_name, ".xlsx")), rowNames = FALSE)
+  }
+} else {
+  stop("valid_path is not defined.")
+}
+
+
+
+#**================================================================**
+#** 4. Main Cosinor Analysis & Statistics Calculation Loop         **
+#**================================================================**
+
+# --- Initialization ---
+# biolist is already defined in Section 1
+
+# Define subjects to process, excluding any already completed
+subjectnames <- unique(CorsanoAnalysissplit$Subject)
+
+# Use one 'processed_subjects' list for simplicity
+if (!exists("processed_subjects1")) processed_subjects1 <- character()
+subjectnames <- setdiff(subjectnames, processed_subjects1)
+
+# Initialize lists to store results efficiently
+CorsanoAnalysisWave_list <- list()
+Stattmp_list <- list()
+
+# --- Main Processing Loop ---
+for (subject in subjectnames) {
+  cat("Processing Patient:", subject, "\n")
+  
+  # Create subject-specific output folder
+  subject_folder <- file.path(valid_path, "Graphs", subject)
+  if (!dir.exists(subject_folder)) {
+    dir.create(subject_folder, recursive = TRUE)
+  }
+  
+  # Process for "Weekday", "Weekend", and "Both"
+  weekz <- c("Weekday", "Weekend", "Both")
+  
+  for (dayz in weekz) {
+    cat("  Processing period:", dayz, "\n")
+    
+    # Filter data for the current analysis scope
+    if (dayz == "Both") {
+      GLMMSplit <- filter(CorsanoAnalysissplit, Subject == subject)
+    } else {
+      GLMMSplit <- filter(CorsanoAnalysissplit, Subject == subject, Week == dayz)
+    }
+    
+    # Skip if there's insufficient data
+    if (nrow(GLMMSplit) < 70) {
+      cat("    Skipping due to insufficient data (", nrow(GLMMSplit), " rows).\n")
+      next
+    }
+    
+    # Initialize Wavedatatmp for this period
+    Wavedatatmp <- data.frame()
+    
+    # --- Loop through each biomarker to perform cosinor analysis ---
+    for (bio in biolist) {
+      # cat("    Processing biometric:", bio, "\n")
+      
+      # 1. CHECK IF COLUMN EXISTS
+      if (!bio %in% names(GLMMSplit)) {
+        # cat("    Skipping", bio, "- column not found in data.\n")
+        next
+      }
+      
+      # 2. Ensure the biomarker column has enough data
+      if (sum(!is.na(GLMMSplit[[bio]])) < 10) next
+      
+      # Run GLMM Cosinor Analysis (wrapped in tryCatch to handle model errors)
+      model_formula <- as.formula(paste(bio, "~ amp_acro(time_col = 'Time', period = c(24, 12), n_components = 2)"))
+      
+      SplitModel2 <- tryCatch({
+        cglmm(model_formula, data = GLMMSplit)
+      }, error = function(e) {
+        cat("    ERROR fitting model for", bio, ":", e$message, "\n")
+        return(NULL)
+      })
+      
+      if (is.null(SplitModel2)) next
+      
+      # --- Generate predictions and summarize ---
+      prediction <- predict(SplitModel2, GLMMSplit)
+      Wavedatatmp1 <- GLMMSplit[, c("Time", bio)]
+      Wavedatatmp1[[paste0(bio, "Cosine")]] <- prediction
+      
+      # Summarize raw data and cosine predictions
+      Wavedatatmp1 <- Wavedatatmp1 %>%
+        group_by(Time) %>%
+        summarise(
+          !!paste0(bio, "SEM") := sd(!!sym(bio), na.rm = TRUE) / sqrt(sum(!is.na(!!sym(bio)))),
+          !!paste0(bio) := mean(!!sym(bio), na.rm = TRUE),
+          !!paste0(bio, "Cosine") := mean(!!sym(paste0(bio, "Cosine")), na.rm = TRUE),
+          .groups = 'drop'
+        )
+      
+      # Join this biomarker's results to the cumulative data frame (Wavedatatmp)
+      if (nrow(Wavedatatmp) == 0) {
+        Wavedatatmp <- Wavedatatmp1  # If it's the first biomarker, directly assign
+      } else {
+        Wavedatatmp <- left_join(Wavedatatmp, Wavedatatmp1, by = "Time")  # Add new columns
+      }
+      
+    } # End biomarker loop
+    
+    # --- Proceed if we have data ---
+    if (nrow(Wavedatatmp) > 0) {
+      
+      # Create Double graph (48 hour view) - STRICTLY FOLLOWING ORIGINAL LOGIC
+      Wavedatatmp2 <- Wavedatatmp %>%
+        mutate(Time = Time + 24) %>%
+        filter(Time != 24)
+      
+      Wavedata <- bind_rows(Wavedatatmp, Wavedatatmp2)
+      
+      # -----------------------------------------------------------------
+      # ENFORCE EXACT COLUMN ORDER FOR TEMPLATE COMPATIBILITY
+      # -----------------------------------------------------------------
+      
+      # Define the strict column order requested
+      desired_columns <- c("Time", 
+                           "CBT", "CBTCosine", "CBTSEM", 
+                           "HR", "HRCosine", "HRSEM", 
+                           "Breath", "BreathCosine", "BreathSEM", 
+                           "HRV", "HRVCosine", "HRVSEM", 
+                           "RR", "RRCosine", "RRSEM", 
+                           "Cortisol", "CortisolCosine", "CortisolSEM", 
+                           "Stress", "StressCosine", "StressSEM", 
+                           "SBT", "SBTCosine", "SBTSEM", 
+                           "Steps", "StepsCosine", "StepsSEM", 
+                           "Energy", "EnergyCosine", "EnergySEM")
+      
+      # 1. Identify which columns from the desired list are missing in Wavedata
+      missing_cols <- setdiff(desired_columns, names(Wavedata))
+      
+      # 2. Add missing columns with NA values (preserves structure for template)
+      if(length(missing_cols) > 0) {
+        Wavedata[missing_cols] <- NA
+      }
+      
+      # 3. Select exactly the desired columns in the desired order
+      Wavedata <- Wavedata %>%
+        select(all_of(desired_columns)) %>%
+        # Replace all NaN with NA one last time to be safe
+        mutate(across(everything(), replace_nan_with_NA))
+      
+      # -----------------------------------------------------------------
+      
+      # --- Export raw Wave data to Excel ---
+      export_path <- file.path(subject_folder, paste0(subject, "_", dayz, "_Wave.xlsx"))
+      write.xlsx(Wavedata, export_path, rowNames = FALSE, firstRow = TRUE)
+      
+      # =================================================================
+      # GRAPHING TEMPLATE LOGIC - UPDATED & DEBUGGED
+      # =================================================================
+      
+      if (dayz %in% c("Weekday", "Weekend")) {
+        # Logic for Weekday/Weekend Split
+        Template <- file.path(valid_path, "Graphing Template.xlsx")
+        Graph <- file.path(subject_folder, paste0(subject, ".xlsx"))
+        
+        # 1. Creation Step: Copy Template if Graph file does not exist
+        if (!file.exists(Graph)) {
+          if (file.exists(Template)) {
+            tryCatch({
+              file.copy(from = Template, to = Graph, overwrite = FALSE)
+              cat("    CREATED new graph file from Template for:", subject, "\n")
+            }, error = function(e) {
+              cat("    ERROR copying template:", e$message, "\n")
+            })
+          } else {
+            cat("    WARNING: Template NOT found at:", Template, "\n")
+          }
+        }
+        
+        # 2. Writing Step: Open Workbook and write data if file exists
+        if (file.exists(Graph)) {
+          tryCatch({
+            wb <- loadWorkbook(Graph)
+            writeData(wb, sheet = dayz, x = Wavedata)
+            saveWorkbook(wb, Graph, overwrite = TRUE)
+            cat("    Success: Written data to sheet", dayz, "in", basename(Graph), "\n")
+          }, error = function(e) {
+            cat("    ERROR writing to graph file:", e$message, "\n")
+          })
+        } else {
+          cat("    ERROR: Graph file could not be created or found at:", Graph, "\n")
+        }
+        
+      } else if (dayz == "Both") {
+        # Logic for "Both" (Combined Everyday)
+        Template <- file.path(valid_path, "Graphing Template 2.xlsx")
+        Graph <- file.path(subject_folder, paste0(subject, "All.xlsx"))
+        
+        # 1. Creation Step: Remove existing and start fresh
+        if (file.exists(Graph)) {
+          file.remove(Graph)
+        }
+        
+        if (file.exists(Template)) {
+          tryCatch({
+            file.copy(from = Template, to = Graph, overwrite = TRUE)
+            
+            # 2. Writing Step
+            if (file.exists(Graph)) {
+              wb <- loadWorkbook(Graph)
+              writeData(wb, sheet = "Raw", x = Wavedata)
+              saveWorkbook(wb, Graph, overwrite = TRUE)
+              cat("    Success: Created and updated 'All' graph file for:", subject, "\n")
+            }
+          }, error = function(e) {
+             cat("    ERROR processing 'Both' file:", e$message, "\n")
+          })
+        } else {
+          cat("    WARNING: Graphing Template 2.xlsx NOT found at:", Template, "\n")
+        }
+      }
+      
+      # =================================================================
+      # END GRAPHING TEMPLATE LOGIC
+      # =================================================================
+      
+      # --- Calculate Statistics (Min, Max, Amp, Mesor, etc.) ---
+      cosine_data <- select(Wavedata, Time, ends_with("Cosine"))
+      
+      for (bio in biolist) {
+        col_name <- paste0(bio, "Cosine")
+        
+        # Check if the column exists and is not all NA (since we forced cols to exist now)
+        if (!col_name %in% names(cosine_data)) next
+        vec <- cosine_data[[col_name]]
+        if(all(is.na(vec))) next
+        
+        max_val <- max(vec, na.rm = TRUE)
+        min_val <- min(vec, na.rm = TRUE)
+        
+        test_long <- data.frame(
+          Patient = subject,
+          week = dayz,
+          Bio = bio,
+          Amplitude = (max_val - min_val) / 2,
+          Mesor = mean(vec, na.rm = TRUE),
+          PPhase = cosine_data$Time[which.max(vec)],
+          TPhase = cosine_data$Time[which.min(vec)],
+          Max = max_val,
+          Min = min_val
+        )
+        Stattmp_list[[length(Stattmp_list) + 1]] <- test_long
+      }
+      
+      # Append collected wave data to the main list
+      Wavedatatmp3 <- cosine_data %>%
+        mutate(Subject = subject, Week = dayz)
+      CorsanoAnalysisWave_list[[length(CorsanoAnalysisWave_list) + 1]] <- Wavedatatmp3
+    }
+    
+  } # End dayz loop
+  
+  # Add subject to processed list after all its periods are complete
+  processed_subjects1 <- c(processed_subjects1, subject)
+  
+} # End subject loop
+
+#**================================================================**
+#** 5. Final Aggregation and Export of Statistics                  **
+#**================================================================**
+
+# Combine all results from the lists at once for maximum efficiency
+if (length(Stattmp_list) > 0) {
+  Stattmp <- bind_rows(Stattmp_list)
+  
+  # Bind with any existing Stat data
+  if(exists("Stat") && is.data.frame(Stat)) {
+    Stat <- bind_rows(Stat, Stattmp)
+  } else {
+    Stat <- Stattmp
+  }
+  
+  # Load and join patient demographic data if it exists
+  patient_info_path <- file.path(valid_path, "Documentations", "patients.xlsx")
+  if (file.exists(patient_info_path)) {
+    PT <- read.xlsx(patient_info_path)
+    Stat <- left_join(Stat, PT, by = c("Patient" = "Patient.Code"))
+  }
+  
+  # Final arrangement and export
+  Stat <- Stat %>%
+    select(any_of(c("BMI", "week", "Bio", "Patient", "gender", "age")), everything()) %>%
+    filter(Patient != "S5U469YF") %>%
+    distinct()
+  
+  
+  export_path <- file.path(valid_path, "Stats", "Full_Statistics_Optimized.xlsx")
+  write.xlsx(Stat, export_path, rowNames = FALSE)
+  cat("Statistical analysis complete. Results saved to:", export_path, "\n")
+}
+
+if (length(CorsanoAnalysisWave_list) > 0) {
+  CorsanoAnalysisWave <- bind_rows(CorsanoAnalysisWave_list)
+}
+
+# Final cleanup
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+
+
+
+#**================================================================**
+#** Old PROCESSING CODE                                            **
+#**================================================================**
+```{r}
+#**================================================================**
+#** 2. Helper Functions                                           **
+#**================================================================**
+
+#' Replace NaN and NULL values with NA.
+#' @param x A vector or column.
+#' @return A vector with NaN/NULL replaced by NA.
+replace_nan_with_NA <- function(x) {
+  x[is.nan(x) | is.null(x)] <- NA
+  return(x)
+}
+
+
+#' Summarize biomarker data by specified grouping variables.
+#' This function replaces the repetitive summarise blocks.
+#' @param data A dataframe.
+#' @param group_vars A character vector of column names to group by.
+#' @return A summarized and ungrouped dataframe.
+summarize_biomarkers <- function(data, group_vars) {
+  data %>%
+    group_by(across(all_of(group_vars))) %>%
+    summarise(
+      # Process all biomarkers except for 'Energy' which has special handling
+      across(
+        all_of(biolist[biolist != "Energy"]),
+        list(
+          mean = ~mean(.x, na.rm = TRUE),
+          SEM = ~sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))
+        ),
+        .names = "{.col}{.fn}"
+      ),
+      # Special handling for Energy (excluding zeros)
+      Energy_mean = mean(Energy[Energy != 0], na.rm = TRUE),
+      Energy_SEM = sd(Energy[Energy != 0], na.rm = TRUE) / sqrt(sum(!is.na(Energy[Energy != 0]))),
+      .groups = 'drop'
+    ) %>%
+    # Rename columns to match original format (e.g., HR_mean -> HR, HR_SEM -> HRSEM)
+    rename_with(~sub("_mean$", "", .), ends_with("_mean")) %>%
+    rename_with(~sub("_SEM$", "SEM", .), ends_with("_SEM"))
+}
+
+
+#**================================================================**
+#** 3. Data Preparation & Aggregation                             **
+#**================================================================**
+
+# --- Prepare Weekday/Weekend Split ---
+CorsanoAnalysissplit <- CorsanoAnalysismulti %>%
+  mutate(
+    Week = ifelse(Day %in% c("Saturday", "Sunday"), "Weekend", "Weekday"),
+    Time = (Time %% 24), # Ensure time is within a 24-hour cycle
+    Time = trunc(Time * 1000) / 1000
+  ) %>%
+  # Duplicate rows at Time == 0 and set them to Time = 24 for continuous plotting
+  bind_rows(filter(., Time == 0) %>% mutate(Time = 24)) %>%
+  arrange(Subject, Week, Time)
+
+# --- Create Aggregated Datasets using the helper function ---
+# Combined by Weekday/Weekend
+CorsanoAnalysisCombined <- summarize_biomarkers(CorsanoAnalysissplit, c("Time", "Subject", "Week"))
+
+# Combined for the whole week (Both)
+CorsanoAnalysisBoth <- summarize_biomarkers(CorsanoAnalysissplit, c("Time", "Subject")) %>%
+  mutate(Week = "Both")
+
+# --- Final Cleanup and Combination ---
+CorsanoAnalysisAll <- bind_rows(CorsanoAnalysisCombined, CorsanoAnalysisBoth) %>%
+  mutate(across(everything(), replace_nan_with_NA)) %>%
+  arrange(Subject, Week, Time)
+
+# Clean up the original split dataframe as well
+CorsanoAnalysissplit <- CorsanoAnalysissplit %>%
+  mutate(across(everything(), replace_nan_with_NA))
+
+# --- Export Processed Data ---
+export_list <- list(
+  CorsanoAnalysissplit = CorsanoAnalysissplit,
+  CorsanoAnalysisAll = CorsanoAnalysisAll
+)
+
+for (file_name in names(export_list)) {
+  path <- file.path(valid_path, "Outputs", paste0(file_name, ".xlsx"))
+  write.xlsx(export_list[[file_name]], path, rowNames = FALSE)
+}
+
+
+
+#**================================================================**
+#** 4. Main Cosinor Analysis & Statistics Calculation Loop        **
+#**================================================================**
+
+# --- Initialization ---
+# Define subjects to process, excluding any already completed
+subjectnames <- unique(CorsanoAnalysissplit$Subject)
+
+# Use one 'processed_subjects' list for simplicity
+if (!exists("processed_subjects1")) processed_subjects1 <- character()
+subjectnames <- setdiff(subjectnames, processed_subjects1)
+
+# Initialize lists to store results efficiently
+CorsanoAnalysisWave_list <- list()
+Stattmp_list <- list()
+
+# --- Main Processing Loop ---
+for (subject in subjectnames) {
+  cat("Processing Patient:", subject, "\n")
+  
+  # Create subject-specific output folder
+  subject_folder <- file.path(valid_path, "Graphs", subject)
+  if (!dir.exists(subject_folder)) {
+    dir.create(subject_folder, recursive = TRUE)
+  }
+  
+  # Process for "Weekday", "Weekend", and "Both"
+  weekz <- c("Weekday", "Weekend", "Both")
+  
+  for (dayz in weekz) {
+    cat("  Processing period:", dayz, "\n")
+    
+    # Filter data for the current analysis scope
+    if (dayz == "Both") {
+      GLMMSplit <- filter(CorsanoAnalysissplit, Subject == subject)
+    } else {
+      GLMMSplit <- filter(CorsanoAnalysissplit, Subject == subject, Week == dayz)
+    }
+    
+    # Skip if there's insufficient data
+    if (nrow(GLMMSplit) < 70) {
+      cat("    Skipping due to insufficient data (", nrow(GLMMSplit), " rows).\n")
+      next
+    }
+    
+    Wavedatatmp_list <- list()
+    
+    # --- Loop through each biomarker to perform cosinor analysis ---
+    for (bio in biolist) {
+      
+      # Ensure the biomarker column has enough data
+      if (sum(!is.na(GLMMSplit[[bio]])) < 10) next
+      
+      # Run GLMM Cosinor Analysis (wrapped in tryCatch to handle model errors)
+      model_formula <- as.formula(paste(bio, "~ amp_acro(time_col = 'Time', period = c(24, 12), n_components = 2)"))
+      
+      SplitModel2 <- tryCatch({
+        cglmm(model_formula, data = GLMMSplit)
+      }, error = function(e) {
+        cat("    ERROR fitting model for", bio, ":", e$message, "\n")
+        return(NULL)
+      })
+      
+      if (is.null(SplitModel2)) next
+      
+      # --- Generate predictions and summarize ---
+      prediction <- predict(SplitModel2, GLMMSplit)
+      Wavedatatmp1 <- GLMMSplit[, c("Time", bio)]
+      Wavedatatmp1[[paste0(bio, "Cosine")]] <- prediction
+      
+      # Summarize raw data and cosine predictions
+      Wavedatatmp1 <- Wavedatatmp1 %>%
+        group_by(Time) %>%
+        summarise(
+          !!bio := mean(!!sym(bio), na.rm = TRUE),
+          !!paste0(bio, "SEM") := sd(!!sym(bio), na.rm = TRUE) / sqrt(sum(!is.na(!!sym(bio)))),
+          !!paste0(bio, "Cosine") := mean(!!sym(paste0(bio, "Cosine")), na.rm = TRUE),
+          .groups = 'drop'
+        )
+      
+      Wavedatatmp_list[[bio]] <- Wavedatatmp1
+    } # End biomarker loop
+    
+    # --- Consolidate and Export Results for the subject/week ---
+    if (length(Wavedatatmp_list) > 0) {
+      # Combine all biomarker dataframes for this subject/week
+      Wavedata <- Reduce(function(x, y) full_join(x, y, by = "Time"), Wavedatatmp_list)
+      
+      # Create 48-hour data for plotting
+      Wavedata <- bind_rows(
+        Wavedata,
+        Wavedata %>% filter(Time != 0) %>% mutate(Time = Time + 24)
+      ) %>% arrange(Time)
+      
+      # --- Export to Excel ---
+      export_path <- file.path(subject_folder, paste0(subject, "_", dayz, "_Wave.xlsx"))
+      write.xlsx(Wavedata, export_path)
+      
+      # --- Calculate Statistics (Min, Max, Amp, Mesor, etc.) ---
+      cosine_data <- select(Wavedata, Time, ends_with("Cosine"))
+      
+      for (bio in biolist) {
+        col_name <- paste0(bio, "Cosine")
+        if (!col_name %in% names(cosine_data)) next
+        
+        vec <- cosine_data[[col_name]]
+        
+        if(all(is.na(vec))) next
+
+        max_val <- max(vec, na.rm = TRUE)
+        min_val <- min(vec, na.rm = TRUE)
+        
+        test_long <- data.frame(
+          Patient = subject,
+          week = dayz,
+          Bio = bio,
+          Amplitude = (max_val - min_val) / 2,
+          Mesor = mean(vec, na.rm = TRUE),
+          PPhase = cosine_data$Time[which.max(vec)],
+          TPhase = cosine_data$Time[which.min(vec)],
+          Max = max_val,
+          Min = min_val
+        )
+        Stattmp_list[[length(Stattmp_list) + 1]] <- test_long
+      }
+      
+      # Append collected wave data to the main list
+      Wavedatatmp3 <- cosine_data %>%
+          mutate(Subject = subject, Week = dayz)
+      CorsanoAnalysisWave_list[[length(CorsanoAnalysisWave_list) + 1]] <- Wavedatatmp3
+    }
+    
+  } # End dayz loop
+  
+  # Add subject to processed list after all its periods are complete
+  processed_subjects1 <- c(processed_subjects1, subject)
+  
+} # End subject loop
+
+#**================================================================**
+#** 5. Final Aggregation and Export of Statistics                 **
+#**================================================================**
+
+# Combine all results from the lists at once for maximum efficiency
+if (length(Stattmp_list) > 0) {
+  Stattmp <- bind_rows(Stattmp_list)
+  
+  # Bind with any existing Stat data
+  if(exists("Stat") && is.data.frame(Stat)) {
+     Stat <- bind_rows(Stat, Stattmp)
+  } else {
+     Stat <- Stattmp
+  }
+
+  # Load and join patient demographic data if it exists
+  patient_info_path <- file.path(valid_path, "Documentations", "patients.xlsx")
+  if (file.exists(patient_info_path)) {
+    PT <- read.xlsx(patient_info_path)
+    Stat <- left_join(Stat, PT, by = c("Patient" = "Patient.Code"))
+  }
+  
+  # Final arrangement and export
+  Stat <- Stat %>%
+    select(any_of(c("BMI", "week", "Bio", "Patient", "gender", "age")), everything()) %>%
+    filter(Patient != "S5U469YF") %>%
+    distinct()
+ 
+  
+  export_path <- file.path(valid_path, "Stats", "Full_Statistics_Optimized.xlsx")
+  write.xlsx(Stat, export_path, rowNames = FALSE)
+  cat("Statistical analysis complete. Results saved to:", export_path, "\n")
+}
+
+if (length(CorsanoAnalysisWave_list) > 0) {
+  CorsanoAnalysisWave <- bind_rows(CorsanoAnalysisWave_list)
+}
+
+# Final cleanup
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+
+

@@ -1,0 +1,951 @@
+---
+title: "Phase 2 Stats Analysis"
+output: html_notebook
+Step: 4
+---
+
+
+#**================================================================**
+#** Libraries and Environment Setup                  **
+#**================================================================**
+```{r}
+#** Load necessary libraries *
+# Using pacman to install and load packages in one step
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  # Original Libraries
+  dplyr,          # For data manipulation
+  tidyr,          # For data tidying
+  openxlsx,       # For reading/writing Excel files
+  lubridate,      # For easier date-time manipulation
+  data.table,     # For efficient data handling, especially rleid
+  pracma,         # For findpeaks
+  GLMMcosinor,    # For generalized linear mixed cosinor models
+  circacompare,   # For comparing circadian rhythms
+  tidyverse,      # A collection of R packages for data science
+  brms,           # For Bayesian regression models using Stan
+  rstanarm,       # For Bayesian models via RStan
+  paletteer,      # Provides a collection of color palettes
+  ggcorrplot,     # For visualizing correlation matrices
+  ggpubr,         # For publication-ready plots
+  corrr,          # For exploring correlations
+  qgraph,         # For network analysis and visualization
+  combinat,       # For combinatorics
+  zoo,            # For ordered time series data
+  caret,          # For classification and regression training
+  janitor,        # For simple data cleaning
+  pwr,            # For power analysis
+  lmPerm,         # For permutation tests for linear models
+  mgcv,            # For permutation tests for GAM
+  pwr,
+  rstatix,
+  hms,
+  fs,
+  car
+  
+)
+
+#** --- Set up a valid path --- *
+# Define base paths for both possible directories
+base_paths <- c(
+  "E:/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging",
+  "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging"
+)
+
+# Find the first existing directory
+valid_path <- first(base_paths[dir.exists(base_paths)])
+
+if (is.na(valid_path)) {
+  stop("Neither of the specified base directories exists. Please check the paths.")
+}
+
+#** --- Define objects to keep --- *
+# This list helps in managing the global environment
+CoreDatasets <- c(
+"CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP", "CorsanoShiftWave", "Variability", "Stability", "SJL", "StatSS", "SLEEP1", "AmpMesAge", "AmpMesGen", "BioBmiStats", "DeviationsS", "SJLDeviations", "SJLBIO", "jsl_summary", "Jetlag", "biolist", "PhysCog", "Aging", "AgingA", "SJL2", "SJLBio"
+)
+
+
+# Biolist
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+#** matching names with codes **
+```{r}
+
+code <- read.xlsx(paste0(valid_path, "/Documentations/code.xlsx"))
+names <- read.xlsx(paste0(valid_path, "/Documentations/names.xlsx"))
+data <- read.xlsx(paste0(valid_path, "/Documentations/Namesdata.xlsx"))
+
+names <- names %>%
+  mutate(Name = str_trim(Name))
+
+code <- code %>%
+  mutate(Name = str_trim(Name))
+
+Patientsdata <- names %>%
+  left_join(code, by = "Name")
+
+Patientsdata <- Patientsdata %>%
+  left_join(data, by = "Name")
+
+
+ #** Export the data *
+    export_path <- paste0(valid_path, "/Documentations/Patientsdata.xlsx")
+    write.xlsx(Patients, export_path, rowNames = FALSE, firstRow = TRUE)
+        
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))   
+
+```
+
+
+
+
+
+#** Set up Phase Diff **
+```{r}
+# Swap PPhase and TPhase for RR and SBT
+StatBoth <- Stat %>%
+  filter(week == "Both") %>%
+  mutate(
+    PPhase_temp = ifelse(Bio %in% c("RR", "SBT"), TPhase, PPhase),
+    TPhase_temp = ifelse(Bio %in% c("RR", "SBT"), PPhase, TPhase),
+    PPhase = PPhase_temp,
+    TPhase = TPhase_temp
+    ) %>%
+  select(PPhase, TPhase, Patient, Bio, age) %>%
+    mutate(
+    PPhase = as.numeric(PPhase),
+    TPhase = as.numeric(TPhase)
+    )
+
+
+# Function to compute signed circular phase difference
+circular_diff_signed <- function(a, b) {
+  diff1 <- a - b
+  diff2 <- (a - b) - 24 * sign(a - b)  # Adjust for wrap-around
+  ifelse(abs(diff1) < abs(diff2), diff1, diff2)  # Choose the shorter signed difference
+}
+
+# Compute mean phase difference for each patient
+pairwise_differences <- StatBoth %>%
+  group_by(Patient, age) %>%
+  summarise(
+    PPhaseDiff = mean(combn(PPhase, 2, function(x) circular_diff_signed(x[1], x[2]), simplify = TRUE), na.rm = TRUE),
+    TPhaseDiff = mean(combn(TPhase, 2, function(x) circular_diff_signed(x[1], x[2]), simplify = TRUE), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Generate all unique biometric pairs
+biometric_pairs <- combn(unique(StatBoth$Bio), 2, simplify = FALSE)
+
+# Compute pairwise differences for each biometric pair
+for (pair in biometric_pairs) {
+  bio1 <- pair[1]
+  bio2 <- pair[2]
+  column_name_PPhase <- paste0(bio1, "_vs_", bio2, "_PPhase")
+  column_name_TPhase <- paste0(bio1, "_vs_", bio2, "_TPhase")
+  
+  # Summarise to ensure only one value per Patient-Bio before pivot_wider()
+  pairwise_values <- StatBoth %>%
+    filter(Bio %in% pair) %>%
+    group_by(Patient, age, Bio) %>%
+    summarise(PPhase = mean(PPhase, na.rm = TRUE), 
+              TPhase = mean(TPhase, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = Bio, values_from = c(PPhase, TPhase)) %>%
+    mutate(
+      across(starts_with("PPhase_"), ~ as.numeric(unlist(.))),  # Ensure numeric conversion
+      across(starts_with("TPhase_"), ~ as.numeric(unlist(.))),
+      !!column_name_PPhase := circular_diff_signed(!!sym(paste0("PPhase_", bio1)), !!sym(paste0("PPhase_", bio2))),
+      !!column_name_TPhase := circular_diff_signed(!!sym(paste0("TPhase_", bio1)), !!sym(paste0("TPhase_", bio2)))
+    ) %>%
+    select(Patient, !!column_name_PPhase, !!column_name_TPhase)
+
+  # Merge results into main dataframe
+  pairwise_differences <- left_join(pairwise_differences, pairwise_values, by = "Patient")
+}
+
+# Reorder columns: PPhase first, then TPhase
+pairwise_differences <- pairwise_differences %>%
+  select(
+    Patient, PPhaseDiff, TPhaseDiff, 
+    matches("_PPhase$"),  # All PPhase pairwise columns
+    matches("_TPhase$")   # All TPhase pairwise columns
+  )
+
+PhaseDiff <- pairwise_differences
+
+ #** Export the data *
+    export_path <- paste0(valid_path, "/Stats/Phase Diff.xlsx")
+    write.xlsx(PhaseDiff, export_path, rowNames = FALSE, firstRow = TRUE)
+        
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))   
+```
+
+
+
+
+#** Amplitude Variability **#
+```{r}
+
+
+
+```
+
+
+
+
+
+
+
+#** Relationship Analysis: Core Functions **#
+```{r}
+# --- Define the outcome metrics (Y variables)
+outcome_metrics <- c("Amplitude","Mesor","PPhase","TPhase","Max","Min")
+
+# --- Define the predictor metrics (X variables)
+predictor_metrics <- c("age","gender","BMI")
+
+# Combine all unique combinations of predictor and outcome variables
+regression_combinations <- expand_grid(
+  Predictor = predictor_metrics,
+  Outcome = outcome_metrics
+)
+
+
+# ----------------------------------------------------------------------
+# --- NEW FUNCTION: Run GLM (Linear Terms Only) ---
+# ----------------------------------------------------------------------
+run_glm_regression <- function(data, predictor, outcome) {
+  
+  results <- list(
+    Linear_Coefficient = NA,
+    Linear_P_Value = NA,
+    Quadratic_Coefficient = NA, 
+    Quadratic_P_Value = NA,     
+    R_Squared = NA
+  )
+  
+  model_family <- gaussian(link = "identity")
+  
+  if (predictor == "gender") {
+    formula_str <- paste(outcome, "~", predictor)
+    model <- glm(as.formula(formula_str), data = data, family = model_family)
+    model_summary <- summary(model)
+    
+    results$R_Squared = 1 - (model$deviance / model$null.deviance)
+    
+    gender_term_name <- grep(paste0("^", predictor), rownames(model_summary$coefficients), value = TRUE)
+    gender_term_name <- gender_term_name[gender_term_name != "(Intercept)"]
+    
+    if (length(gender_term_name) > 0) {
+      linear_row <- model_summary$coefficients[gender_term_name[1], ]
+      results$Linear_Coefficient = linear_row["Estimate"]
+      results$Linear_P_Value = linear_row["Pr(>|t|)"]
+    }
+    
+  } else {
+    formula_str <- paste(outcome, "~", predictor) 
+    model <- glm(as.formula(formula_str), data = data, family = model_family)
+    model_summary <- summary(model)
+    
+    results$R_Squared = 1 - (model$deviance / model$null.deviance)
+    
+    if (predictor %in% rownames(model_summary$coefficients)) {
+      linear_row <- model_summary$coefficients[predictor, ]
+      results$Linear_Coefficient = linear_row["Estimate"]
+      results$Linear_P_Value = linear_row["Pr(>|t|)"]
+    }
+  }
+  
+  return(results)
+}
+
+
+# ----------------------------------------------------------------------
+# --- NEW FUNCTION: Run GAM (Smooth Term) ---
+# ----------------------------------------------------------------------
+run_gam_regression <- function(data, predictor, outcome) {
+  
+  results <- list(
+    Model_Type = "GAM",
+    Effective_DF = NA, 
+    GAM_P_Value = NA,
+    R_Squared = NA
+  )
+  
+  if (predictor == "gender") {
+    formula_str <- paste(outcome, "~", predictor)
+    model <- gam(as.formula(formula_str), data = data, family = gaussian)
+    model_summary <- summary(model)
+    
+    results$R_Squared <- model_summary$r.sq 
+    
+    gender_term_name <- grep(paste0("^", predictor), rownames(model_summary$p.table), value = TRUE)
+    gender_term_name <- gender_term_name[gender_term_name != "(Intercept)"]
+    
+    if (length(gender_term_name) > 0) {
+      results$GAM_P_Value = model_summary$p.table[gender_term_name[1], "Pr(>|t|)"]
+      results$Effective_DF = 1 
+    }
+    
+  } else {
+    formula_str <- paste(outcome, "~ s(", predictor, ")")
+    model <- gam(as.formula(formula_str), data = data, family = gaussian)
+    model_summary <- summary(model)
+    
+    results$R_Squared <- model_summary$r.sq 
+    
+    smooth_term_row <- model_summary$s.table
+    
+    if (!is.null(smooth_term_row) && nrow(smooth_term_row) > 0) {
+      results$Effective_DF = smooth_term_row[1, "edf"]
+      results$GAM_P_Value = smooth_term_row[1, "p-value"]
+    }
+  }
+  
+  return(results)
+}
+
+
+# ----------------------------------------------------------------------
+# --- NEW FUNCTION: Visualization of Significant GLM & GAM Relationships ---
+# ----------------------------------------------------------------------
+
+generate_plot <- function(bio, predictor, outcome, glm_p, gam_p, glm_rsq, gam_rsq, gam_edf, Week) {
+  
+  # Filter plot_data only by Bio and Week from the overall StatSS dataset
+  plot_data <- StatSS %>% 
+    filter(Bio == bio) %>%
+    filter(week == Week)
+  
+  # --- 1. Check Significance ---
+  is_glm_sig <- glm_p < 0.05
+  is_gam_sig <- gam_p < 0.05
+  
+  if (!is_glm_sig) {
+    warning(paste("Skipping plot:", Week, bio, predictor, outcome, "as GLM was not significant. Check filtering logic."))
+    return(NULL)
+  }
+  
+  if (!(predictor %in% names(plot_data) && outcome %in% names(plot_data))) {
+    warning(paste("Skipping plot:", Week, bio, predictor, outcome, "due to missing columns."))
+    return(NULL)
+  }
+  
+  # --- 2. Build Subtitle based on significant models ---
+  subtitle_parts <- c()
+  
+  if (is_glm_sig) {
+    subtitle_parts <- c(subtitle_parts, 
+                         paste0("GLM (Linear): R²=", round(glm_rsq, 3), 
+                                ", P=", round(glm_p, 4)))
+  }
+  
+  if (is_gam_sig) {
+    subtitle_parts <- c(subtitle_parts, 
+                         paste0("GAM (Smooth): R²=", round(gam_rsq, 3), 
+                                ", P=", round(gam_p, 4), 
+                                ", EDF=", round(gam_edf, 2)))
+  }
+  
+  plot_subtitle <- paste(subtitle_parts, collapse = " | ")
+  
+  # --- 3. Initialize Plot ---
+  
+  if (predictor == "gender") {
+    # --- A. BOXPLOT (for categorical gender) ---
+    
+    plot_data <- plot_data %>% 
+      filter(!is.na(.data[[outcome]])) %>%
+      filter(.data[[predictor]] %in% c("male", "female"))
+    
+    plot <- ggplot(plot_data, aes(x = .data[[predictor]], y = .data[[outcome]])) +
+      geom_boxplot(width = 0.5, outlier.shape = NA, fill = "gray90", color = "gray50") +
+      geom_jitter(width = 0.2, alpha = 0.6, color = "#1f77b4", size = 1.5) + 
+      labs(
+        title = paste0(bio, ": ", outcome, " by ", predictor, " (Group Comparison, ", Week, ")"),
+        subtitle = plot_subtitle,
+        x = paste(predictor, "(Biomarker:", bio, ")"),
+        y = outcome
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(
+        plot.title = element_text(face = "bold"),
+        panel.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white")
+      )
+    
+    cat(paste0("  Generated Boxplot for: ", Week, " ", bio, " (", predictor, ")\n"))
+    
+  } else {
+    # --- B. SCATTER PLOT (for continuous predictors: age, BMI) ---
+    
+    plot <- ggplot(plot_data, aes(x = .data[[predictor]], y = .data[[outcome]])) +
+      geom_point(alpha = 0.6, color = "#1f77b4") + 
+      labs(
+        title = paste0(bio, ": ", outcome, " ~ ", predictor, " (GLM vs GAM Fit, ", Week, ")"),
+        subtitle = plot_subtitle,
+        x = paste(predictor, "(Biomarker:", bio, ")"),
+        y = outcome
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(
+        plot.title = element_text(face = "bold"),
+        panel.background = element_rect(fill = "white", colour = "white"),
+        plot.background = element_rect(fill = "white", colour = "white")
+      )
+    
+    # --- 4. Conditionally Add GLM Linear Fit (Solid Blue Line) ---
+    if (is_glm_sig) {
+      plot <- plot + 
+        geom_smooth(
+          method = "lm", 
+          formula = y ~ x, 
+          color = "#1f77b4", 
+          linetype = "solid",
+          linewidth = 1.2,
+          se = TRUE 
+        )
+      cat(paste0("  Added GLM Linear fit for: ", Week, " ", bio, " (", predictor, ")\n"))
+    }
+    
+    # --- 5. Conditionally Add GAM Smooth Fit (Dashed Red Line) ---
+    if (is_gam_sig) {
+      plot <- plot +
+        geom_smooth(
+          method = "gam", 
+          formula = y ~ s(x), 
+          color = "#d62728", 
+          linetype = "dashed",
+          linewidth = 1.2,
+          se = TRUE
+        )
+      cat(paste0("  Added GAM Smooth fit for: ", Week, " ", bio, " (", predictor, ")\n"))
+    }
+    
+  }
+  
+  # --- 6. Save Plot to PNG File ---
+  # Path structure: valid_path/Stats/Pics/{Week}/{bio}_{predictor}_vs_{outcome}.png
+  file_name <- paste0(bio, "_", predictor, "_vs_", outcome, ".png")
+  
+  # Create the output directory including the Week level
+  output_dir <- file.path(valid_path, "Stats/Pics", Week)
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  output_path <- file.path(output_dir, file_name)
+  
+  # Save the plot
+  ggsave(filename = output_path, plot = plot, width = 7, height = 5, units = "in")
+  cat(paste0("  Saved plot to: ", output_path, "\n"))
+  
+  return(plot) 
+}
+
+
+# ----------------------------------------------------------------------
+# --- MAIN FUNCTION: Encapsulate Analysis by Week ---
+# ----------------------------------------------------------------------
+
+run_analysis_by_week <- function(current_week) {
+  
+  cat(paste0("\n*** Starting Analysis for Week: ", current_week, " ***\n"))
+  
+  # Filter data for the current week level
+  CurrentStatSS <- StatSS %>%
+    filter(week == current_week) %>%
+    # Ensure gender is a factor for this subset
+    mutate(gender = as.factor(gender))
+  
+  # Skip if no data
+  if (nrow(CurrentStatSS) == 0) {
+    warning(paste("No data found for week:", current_week, ". Skipping analysis."))
+    return(NULL)
+  }
+  
+  # --- ANALYSIS STREAMS: Execute GLM and GAM Separately ---
+  
+  # 1. GLM Stream (Linear)
+  GLM_RegressionResults <- CurrentStatSS %>%
+    group_by(Bio) %>%
+    summarise(
+      Combinations = list(regression_combinations),
+      .groups = 'drop'
+    ) %>%
+    left_join(CurrentStatSS %>%
+                group_by(Bio) %>%
+                nest() %>%
+                rename(Data = data),
+              by = "Bio") %>%
+    unnest(Combinations) %>%
+    mutate(
+      Model_Output = pmap(list(Data, Predictor, Outcome), run_glm_regression)
+    ) %>%
+    unnest_wider(Model_Output)
+  
+  # 2. GAM Stream (Smooth Terms)
+  GAM_RegressionResults <- CurrentStatSS %>%
+    group_by(Bio) %>%
+    summarise(
+      Combinations = list(regression_combinations),
+      .groups = 'drop'
+    ) %>%
+    left_join(CurrentStatSS %>%
+                group_by(Bio) %>%
+                nest() %>%
+                rename(Data = data),
+              by = "Bio") %>%
+    unnest(Combinations) %>%
+    mutate(
+      Model_Output = pmap(list(Data, Predictor, Outcome), run_gam_regression)
+    ) %>%
+    unnest_wider(Model_Output) %>%
+    rename(Model_P_Value = GAM_P_Value)
+  
+  
+  # --- Output and Filtering: Creating Wide Format ---
+  
+  # 1. Prepare GLM results for merge (rename columns)
+  GLM_Wide <- GLM_RegressionResults %>%
+    select(Bio, Predictor, Outcome, Linear_Coefficient, Linear_P_Value, R_Squared) %>%
+    rename(
+      GLM_Coefficient = Linear_Coefficient,
+      GLM_P_Value = Linear_P_Value,
+      GLM_R_Squared = R_Squared
+    )
+  
+  # 2. Prepare GAM results for merge (rename columns)
+  GAM_Wide <- GAM_RegressionResults %>%
+    select(Bio, Predictor, Outcome, Model_P_Value, Effective_DF, R_Squared) %>%
+    rename(
+      GAM_P_Value = Model_P_Value,
+      GAM_EDF = Effective_DF,
+      GAM_R_Squared = R_Squared
+    )
+  
+  # 3. Combine All Results into AgingA (Wide Format)
+  AgingA_Week <- full_join(GLM_Wide, GAM_Wide, by = c("Bio", "Predictor", "Outcome")) %>%
+    mutate(Week = current_week) # Add Week identifier
+  
+  # 4. Filter Significant Results (P < 0.05) into Aging
+  Aging_Week <- AgingA_Week %>%
+    filter(GLM_P_Value < 0.05) %>%
+    mutate(Week = current_week) # Add Week identifier
+  
+  
+  # --- 5. Visualization of Significant GLM & GAM Relationships ---
+  if (nrow(Aging_Week) > 0) {
+    cat(paste0("\nGenerating and saving ", nrow(Aging_Week), " plots for GLM-significant relationships in ", current_week, "...\n"))
+    
+    saved_plots <- pmap(
+      list(Aging_Week$Bio, Aging_Week$Predictor, Aging_Week$Outcome,
+           Aging_Week$GLM_P_Value, Aging_Week$GAM_P_Value, 
+           Aging_Week$GLM_R_Squared, Aging_Week$GAM_R_Squared, Aging_Week$GAM_EDF,
+           Aging_Week$Week), # Pass Week level
+      generate_plot
+    )
+    
+    # Filter out NULL results and display plots
+    plots_to_print <- saved_plots[!sapply(saved_plots, is.null)]
+    invisible(lapply(plots_to_print, print)) 
+    
+    cat(paste0(length(plots_to_print), " plots successfully saved and displayed for ", current_week, ".\n"))
+  } else {
+    cat(paste0("No significant GLM relationships found for ", current_week, ". No plots generated.\n"))
+  }
+  
+  # --- 6. Export Single Week Results (Optional but good for archives) ---
+  
+  # For the user, we will only return the dataframes to be combined into Master,
+  # but here is where you would export individual week files if needed.
+  
+  # Returning a list of the dataframes with a Type column for easy combining
+  return(list(
+    AgingA = AgingA_Week %>% mutate(Type = "AgingA"),
+    Aging = Aging_Week %>% mutate(Type = "Aging")
+  ))
+}
+
+
+# ----------------------------------------------------------------------
+# --- RUN ALL WEEKS AND COMBINE ---
+# ----------------------------------------------------------------------
+
+# StatSS (full data) is used across all functions for filtering
+StatSS <- Stat
+StatSS$gender <- as.factor(StatSS$gender)
+StatSS$week <- as.factor(StatSS$week)
+
+
+# Identify the levels to loop over
+week_levels <- unique(StatSS$week)
+# Remove potential NA values from the week levels list if they exist
+week_levels <- week_levels[!is.na(week_levels)]
+
+
+# Run the analysis for all week levels and collect results
+MasterResultsList <- purrr::map(week_levels, run_analysis_by_week)
+
+
+# Combine all results into final master dataframes
+# map_dfr is used to combine the elements (AgingA and Aging) from each list item
+AgingAMaster <- MasterResultsList %>% 
+  purrr::map("AgingA") %>% 
+  purrr::list_rbind() %>%
+  select(-Type)
+  
+AgingMaster <- MasterResultsList %>%
+  purrr::map("Aging") %>%
+  purrr::list_rbind() %>%
+  select(-Type)
+
+
+# Final Outputs (Printed to RStudio Console)
+print("--- FINAL MASTER: ALL Combined GLM & GAM Results (AgingAMaster) ---")
+print(AgingAMaster)
+
+print("--- FINAL MASTER: Significant GLM Relationships (AgingMaster) ---")
+print(AgingMaster)
+
+
+# ----------------------------------------------------------------------
+# --- 7. Export Master Results ---
+# ----------------------------------------------------------------------
+
+# --- Export Master Processed Data ---
+export_list_master <- list(
+  Aging = AgingMaster,
+  AgingA = AgingAMaster
+)
+
+# Ensure the Stats directory exists for main exports
+if (!dir.exists(file.path(valid_path, "Stats"))) {
+  dir.create(file.path(valid_path, "Stats"), recursive = TRUE)
+}
+
+# Exporting the combined master dataframes to separate files
+for (file_name in names(export_list_master)) {
+  path <- file.path(valid_path, "Stats", paste0(file_name, ".xlsx"))
+  write.xlsx(export_list_master[[file_name]], path, rowNames = FALSE)
+  cat(paste0("Exported master file to: ", path, "\n"))
+}
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+
+#** Separate graphs
+#**================================================================**
+#** 8. Publication Quality Plot                                    **
+#**================================================================**
+```{r}
+# --- 1. Filter Data (Using full StatSS data) ---
+# Assuming StatSS contains the raw data points needed for Amplitude and age
+plot_data_pub <- StatSS %>%
+  # Filter out NA values for the primary variables
+  filter(!is.na(age) & !is.na(Amplitude),
+         week == "Both",
+         Bio == "CBT")
+
+# --- 2. Create the ggplot object ---
+# Use the full dataset (no grouping by week for this specific plot)
+amp_plot <- ggplot(plot_data_pub, aes(x = age, y = Amplitude)) +
+  
+  # Add scatter plot points (light gray for base data)
+  geom_point(alpha = 0.7, color = "Blue") +
+  
+  # Add GLM (linear fit) line
+  geom_smooth(
+    method = "lm", 
+    formula = y ~ x, 
+    color = "#d62728", # Red
+    linetype = "solid",
+    linewidth = 1.0,
+    se = TRUE 
+  ) +
+  
+  # Apply Axis Limits (limit y axis to 30)
+  ylim(0, 0.6) +
+  
+  # Apply Labels
+  labs(
+    title = "CBT Amplitude vs. Age",
+    subtitle = "",
+    x = "Age",
+    y = "Amplitude (degrees C)"
+  ) +
+  
+  # Apply Clean Theme with white background
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "black"),
+    panel.grid.major = element_line(color = "black"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.background = element_rect(fill = "white", colour = NA), # White panel background, no border
+    plot.background = element_rect(fill = "white", colour = NA),  # White plot background, no border
+    axis.title.x = element_text(face = "bold", size = 24),
+    axis.title.y = element_text(face = "bold", size = 24),
+    axis.text.x = element_text(face = "bold", size = 24, color = "black"),
+    axis.text.y = element_text(face = "bold", size = 24, color = "black")
+  )
+
+# --- 3. Display the Plot ---
+print(amp_plot)
+
+# --- 4. Save the Plot to specified path ---
+output_dir <- file.path(valid_path, "Stats/PubPics")
+
+# Ensure the output directory exists
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+file_name <- "CBT_Amplitude_vs_Age_Pub_v1.png"
+output_path <- file.path(output_dir, file_name)
+
+ggsave(filename = output_path, plot = amp_plot, width = 7, height = 7, units = "in", dpi = 300)
+
+cat(paste0("\nSaved Publication Plot to: ", output_path, "\n"))
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+#** T-TEST and CORRELATION TEST **#
+```{r}
+
+SJL3 <- SJL %>%
+  filter(week == "Both",
+         bio == "CBT")
+
+# ==============================================================================
+# 1. INDEPENDENT SAMPLES T-TEST
+# Purpose: Test if the mean 'amplitude' for males is significantly different 
+#          from the mean 'amplitude' for females.
+# ==============================================================================
+
+cat("\n--- Running Independent Samples T-Test (Amplitude by Gender) ---\n")
+
+# T-TEST AND NA HANDLING:
+# When using the formula interface (y ~ x), t.test() automatically removes rows 
+# where either 'amplitude' or 'gender' is NA before performing the test.
+
+t_test_result <- t.test(amplitude ~ gender, data = SJL3)
+
+# Print the results
+print(t_test_result)
+
+
+# --- A. BOXPLOT (for categorical gender) ---
+plot <- SJL3 %>%
+  # This line removes any row where EITHER 'gender' or 'amplitude' is NA
+  filter(!is.na(gender), !is.na(amplitude)) %>%
+  
+  # Map 'gender' to both fill (for boxplot) and color (for jitter)
+  ggplot(aes(x = gender, y = amplitude, fill = gender, color = gender)) +
+    
+    # Boxplot uses the 'fill' aesthetic. Use black for border for definition.
+    geom_boxplot(width = 0.5, outlier.shape = NA, color = "black") +
+    
+    # Jitter points use the 'color' aesthetic.
+    geom_jitter(width = 0.2, alpha = 1, size = 1.5) + 
+    
+    # Define manual fill colors for the boxes (Light Red and Light Blue)
+    scale_fill_manual(values = c("female" = "#FAD0D0", "male" = "#D0D0FA")) +
+    
+    # Define manual color for the jitter points (Red and Blue)
+    scale_color_manual(values = c("female" = "#E41A1C", "male" = "#377EB8")) +
+    
+    labs(
+      title = paste0("CBT Amplitude: Female vs Male"),
+      x = "Gender",
+      y = "CBT Amplitude (degrees C)"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      panel.background = element_rect(fill = "white", colour = "white"),
+      plot.background = element_rect(fill = "white", colour = "white"),
+      # Optionally remove the legend since the x-axis already shows gender
+      legend.position = "none" 
+    )
+
+plot
+```
+
+
+
+```{r}
+# ==============================================================================
+# DATA SETUP AND INITIALIZATION
+# (Assuming SJL data frame exists with columns: week, bio, amplitude, gender)
+# ==============================================================================
+
+# Define the list of biological variables to iterate over
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+
+# Initialize an empty data frame to store the results of all tests
+GenderStats <- data.frame()
+
+cat("\n--- Running Batch T-Tests and Power Analyses ---\n")
+
+# ==============================================================================
+# 1. LOOP THROUGH BIOLIST FOR T-TESTS AND POWER ANALYSIS
+# ==============================================================================
+
+for (current_bio in biolist) {
+  cat(paste("\nAnalyzing:", current_bio, "...\n"))
+
+  # A. Filter the data for the current bio-metric and for 'week == Both'
+  # We assume 'amplitude' is the dependent variable for all 'bio' types
+  SJL_filtered <- SJL %>%
+    filter(week == "Both", bio == current_bio) %>%
+    # Ensure only rows with non-NA values for both variables are considered
+    drop_na(amplitude, gender)
+
+  # Check if there is enough data in both groups to perform a test
+  n_female <- SJL_filtered %>% filter(gender == "female") %>% nrow()
+  n_male <- SJL_filtered %>% filter(gender == "male") %>% nrow()
+
+  if (n_female < 2 | n_male < 2) {
+    cat(paste("Skipping", current_bio, ": Insufficient data (N_F =", n_female, ", N_M =", n_male, ") for t-test.\n"))
+    # Add a row of NAs to maintain structure in GenderStats for skipped tests
+    new_row <- data.frame(
+      bio = current_bio,
+      t_value = NA, df = NA, p_value = NA, cohens_d = NA,
+      n_female = n_female, n_male = n_male, power = NA
+    )
+    GenderStats <- rbind(GenderStats, new_row)
+    next
+  }
+
+  # B. Independent Samples T-Test
+  t_result <- t.test(amplitude ~ gender, data = SJL_filtered, var.equal = TRUE) # Assuming equal variance for simplicity/consistency
+
+  # C. Effect Size (Cohen's d)
+  d_result <- SJL_filtered %>%
+    cohens_d(amplitude ~ gender, var.equal = TRUE)
+  cohens_d_value <- d_result$effsize[1]
+
+  # D. Power Analysis
+  n_avg <- mean(c(n_female, n_male))
+  power_result <- pwr.t.test(
+    n = n_avg,
+    d = cohens_d_value,
+    sig.level = 0.05,
+    type = "two.sample",
+    alternative = "two.sided",
+    power = NULL
+  )
+
+  # E. Compile and Append Results
+  new_row <- data.frame(
+    bio = current_bio,
+    t_value = t_result$statistic,
+    df = t_result$parameter,
+    p_value = t_result$p.value,
+    cohens_d = cohens_d_value,
+    n_female = n_female,
+    n_male = n_male,
+    power = power_result$power
+  )
+
+  GenderStats <- rbind(GenderStats, new_row)
+  cat(paste("Results saved (p =", round(t_result$p.value, 4), ")\n"))
+}
+
+# ==============================================================================
+# 2. DISPLAY SUMMARY TABLE
+# ==============================================================================
+cat("\n--- Final GenderStats Summary Table ---\n")
+print(GenderStats %>%
+        # Add a significance indicator column for easier reading
+        mutate(Significance = ifelse(p_value < 0.05, "YES", "NO")) %>%
+        select(bio, p_value, cohens_d, power, Significance, n_female, n_male) %>%
+        # Round numerical columns for display
+        mutate(across(c(p_value, cohens_d, power), ~round(., 4)))
+)
+
+# ==============================================================================
+# 3. COMBINED BOXPLOT VISUALIZATION (STATISTICALLY SIGNIFICANT ONLY)
+# ==============================================================================
+
+# Filter for significant results (p < 0.05)
+significant_bios <- GenderStats %>%
+  filter(p_value < 0.05) %>%
+  pull(bio)
+
+# Filter the main data (SJL) to include only the significant 'bio' types
+SJL_sig_plot_data <- SJL %>%
+  filter(week == "Both", bio %in% significant_bios) %>%
+  filter(!is.na(gender), !is.na(amplitude))
+
+cat("\n--- Generating Combined Boxplot for Significant Comparisons ---\n")
+
+if (length(significant_bios) > 0) {
+  # Create the combined plot using facet_wrap
+  combined_plot <- SJL_sig_plot_data %>%
+    ggplot(aes(x = gender, y = amplitude, fill = gender, color = gender)) +
+    
+    # Boxplot uses the 'fill' aesthetic. Use black for border for definition.
+    geom_boxplot(width = 0.5, outlier.shape = NA, color = "black") +
+    
+    # Jitter points use the 'color' aesthetic.
+    geom_jitter(width = 0.2, alpha = 0.6, size = 1.5) +
+    
+    # Define manual fill colors for the boxes (Light Red and Light Blue)
+    scale_fill_manual(values = c("female" = "#FAD0D0", "male" = "#D0D0FA")) +
+    
+    # Define manual color for the jitter points (Red and Blue)
+    scale_color_manual(values = c("female" = "#E41A1C", "male" = "#377EB8")) +
+    
+    labs(
+      title = "Amplitude Differences by Gender (Only p < 0.05 Shown)",
+      subtitle = paste0("Total Significant Metrics: ", length(significant_bios)),
+      x = "Gender",
+      y = "Amplitude"
+    ) +
+    
+    # Split the graph by the significant 'bio' type
+    # 'scales = "free_y"' allows the y-axis scale to adjust for each metric
+    facet_wrap(~ bio, scales = "free_y", ncol = 3) +
+    
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      panel.background = element_rect(fill = "white", colour = "white"),
+      plot.background = element_rect(fill = "white", colour = "white"),
+      legend.position = "none",
+      strip.background = element_rect(fill = "#E0E0E0", color = "black"),
+      strip.text = element_text(face = "bold")
+    )
+  
+  print(combined_plot)
+} else {
+  cat("No statistically significant comparisons (p < 0.05) found to plot.\n")
+}
+
+# The final GenderStats data frame containing all results is now available in the R environment.
+```
+
+

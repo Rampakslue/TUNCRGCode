@@ -1,0 +1,748 @@
+---
+title: "Phase 2 Aging Stats Export"
+output: html_notebook
+Step: 2
+---
+
+#**================================================================**
+#** Libraries and Environment Setup                  **
+#**================================================================**
+```{r}
+#** Load necessary libraries *
+# Using pacman to install and load packages in one step
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  # Original Libraries
+  dplyr,          # For data manipulation
+  tidyr,          # For data tidying
+  openxlsx,       # For reading/writing Excel files
+  lubridate,      # For easier date-time manipulation
+  data.table,     # For efficient data handling, especially rleid
+  pracma,         # For findpeaks
+  GLMMcosinor,    # For generalized linear mixed cosinor models
+  circacompare,   # For comparing circadian rhythms
+  tidyverse,      # A collection of R packages for data science
+  brms,           # For Bayesian regression models using Stan
+  rstanarm,       # For Bayesian models via RStan
+  paletteer,      # Provides a collection of color palettes
+  ggcorrplot,     # For visualizing correlation matrices
+  ggpubr,         # For publication-ready plots
+  corrr,          # For exploring correlations
+  qgraph,         # For network analysis and visualization
+  combinat,       # For combinatorics
+  zoo,            # For ordered time series data
+  caret,          # For classification and regression training
+  janitor,        # For simple data cleaning
+  pwr,            # For power analysis
+  lmPerm,         # For permutation tests for linear models
+  mgcv,            # For permutation tests for GAM
+  pwr,
+  rstatix,
+  hms,
+  fs,
+  car
+  
+)
+
+#** --- Set up a valid path --- *
+# Define base paths for both possible directories
+base_paths <- c(
+  "E:/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging",
+  "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging"
+)
+
+# Find the first existing directory
+valid_path <- first(base_paths[dir.exists(base_paths)])
+
+if (is.na(valid_path)) {
+  stop("Neither of the specified base directories exists. Please check the paths.")
+}
+
+#** --- Define objects to keep --- *
+# This list helps in managing the global environment
+CoreDatasets <- c(
+"CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP", "CorsanoShiftWave", "Variability", "Stability", "SJL", "StatSS", "SLEEP1", "AmpMesAge", "AmpMesGen", "BioBmiStats", "DeviationsS", "SJLDeviations", "SJLBIO", "jsl_summary", "Jetlag", "biolist", "PhysCog", "Aging", "AgingA", "SJL2", "SJLBio"
+)
+
+# Biolist
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+#** Set up Weekday vs Weekend
+```{r}
+CorsanoAnalysissplit <- CorsanoAnalysismulti %>%
+  mutate(Week = ifelse(Day %in% c("Saturday", "Sunday"), "Weekend", "Weekday")) %>%
+# Convert and merge into 24-hour format, kept within the same day
+  mutate(Time = Time %% 24,
+         Time = trunc(Time * 1000) / 1000) %>%
+  arrange(Subject, Week, Time)
+
+# Duplicate rows where Time == 0, change Time to 24, and add them back
+CorsanoAnalysissplit <- CorsanoAnalysissplit %>%
+  bind_rows(CorsanoAnalysissplit %>%
+      filter(Time == 0) %>%
+      mutate(Time = 24)) %>%
+  arrange(Subject, Week, Time)
+
+# Create a dataset where it's already combined to a single day
+CorsanoAnalysisCombined <- CorsanoAnalysissplit %>%
+  group_by(Time, Subject, Week) %>%
+  summarise(
+    HRSEM = sd(HR, na.rm = TRUE) / sqrt(sum(!is.na(HR))),
+    HR = mean(HR, na.rm = TRUE),
+    
+    StepsSEM = sd(Steps, na.rm = TRUE) / sqrt(sum(!is.na(Steps))),
+    Steps = mean(Steps, na.rm = TRUE),
+    
+    EnergySEM = sd(Energy[Energy != 0], na.rm = TRUE) / sqrt(sum(!is.na(Energy[Energy != 0]))),
+    Energy = mean(Energy[Energy != 0], na.rm = TRUE),
+    
+    BreathSEM = sd(Breath, na.rm = TRUE) / sqrt(sum(!is.na(Breath))),
+    Breath = mean(Breath, na.rm = TRUE),
+    
+    HRVSEM = sd(HRV, na.rm = TRUE) / sqrt(sum(!is.na(HRV))),
+    HRV = mean(HRV, na.rm = TRUE),
+    
+    RRSEM = sd(RR, na.rm = TRUE) / sqrt(sum(!is.na(RR))),
+    RR = mean(RR, na.rm = TRUE),
+    
+    CortisolSEM = sd(Cortisol, na.rm = TRUE) / sqrt(sum(!is.na(Cortisol))),
+    Cortisol = mean(Cortisol, na.rm = TRUE),
+    
+    StressSEM = sd(Stress, na.rm = TRUE) / sqrt(sum(!is.na(Stress))),
+    Stress = mean(Stress, na.rm = TRUE),
+    
+    SBTSEM = sd(SBT, na.rm = TRUE) / sqrt(sum(!is.na(SBT))),
+    SBT = mean(SBT, na.rm = TRUE),
+    
+    CBTSEM = sd(CBT, na.rm = TRUE) / sqrt(sum(!is.na(CBT))),
+    CBT = mean(CBT, na.rm = TRUE)
+    ) %>%
+  ungroup() %>%
+  arrange(Subject, Week, Time)
+
+# Create a dataset where Everything is combined
+CorsanoAnalysisBoth <- CorsanoAnalysismulti %>%
+  mutate(Time = Time %% 24,
+         Time = trunc(Time * 1000) / 1000) %>%
+  select(-Day) %>%
+  group_by(Time, Subject) %>%
+  summarise(
+    HRSEM = sd(HR, na.rm = TRUE) / sqrt(sum(!is.na(HR))),
+    HR = mean(HR, na.rm = TRUE),
+    
+    StepsSEM = sd(Steps, na.rm = TRUE) / sqrt(sum(!is.na(Steps))),
+    Steps = mean(Steps, na.rm = TRUE),
+    
+    EnergySEM = sd(Energy[Energy != 0], na.rm = TRUE) / sqrt(sum(!is.na(Energy[Energy != 0]))),
+    Energy = mean(Energy[Energy != 0], na.rm = TRUE),
+    
+    BreathSEM = sd(Breath, na.rm = TRUE) / sqrt(sum(!is.na(Breath))),
+    Breath = mean(Breath, na.rm = TRUE),
+    
+    HRVSEM = sd(HRV, na.rm = TRUE) / sqrt(sum(!is.na(HRV))),
+    HRV = mean(HRV, na.rm = TRUE),
+    
+    RRSEM = sd(RR, na.rm = TRUE) / sqrt(sum(!is.na(RR))),
+    RR = mean(RR, na.rm = TRUE),
+    
+    CortisolSEM = sd(Cortisol, na.rm = TRUE) / sqrt(sum(!is.na(Cortisol))),
+    Cortisol = mean(Cortisol, na.rm = TRUE),
+    
+    StressSEM = sd(Stress, na.rm = TRUE) / sqrt(sum(!is.na(Stress))),
+    Stress = mean(Stress, na.rm = TRUE),
+    
+    SBTSEM = sd(SBT, na.rm = TRUE) / sqrt(sum(!is.na(SBT))),
+    SBT = mean(SBT, na.rm = TRUE),
+    
+    CBTSEM = sd(CBT, na.rm = TRUE) / sqrt(sum(!is.na(CBT))),
+    CBT = mean(CBT, na.rm = TRUE)
+    ) %>%
+  ungroup() %>%
+  arrange(Subject, Time)
+
+#**Remove all NULL and NaN values**
+  # Function to replace NULL and NaN with NA
+    replace_nan_with_NA <- function(x) {
+      if(is.null(x)) {
+        return(NA)
+      } else {
+        x[is.nan(x)] <- NA
+        return(x)
+      }
+    }
+    
+CorsanoAnalysissplit <- as.data.frame(lapply(CorsanoAnalysissplit, replace_nan_with_NA))
+CorsanoAnalysisCombined <- as.data.frame(lapply(CorsanoAnalysisCombined, replace_nan_with_NA))
+CorsanoAnalysisBoth <- as.data.frame(lapply(CorsanoAnalysisBoth, replace_nan_with_NA))
+
+
+# Combine Weekday, Weekend, and both
+CorsanoAnalysisBoth <- CorsanoAnalysisBoth %>%
+  mutate(Week = "Both") %>%
+  arrange(Subject, Week, Time) %>%
+  select(Time, Subject, Week, everything())
+
+CorsanoAnalysisAll <- bind_rows(CorsanoAnalysisBoth, CorsanoAnalysisCombined) %>%
+  arrange(Subject, Time)
+
+
+#** Exporting Data**
+# file paths
+file_paths <- c("CorsanoAnalysissplit", "CorsanoAnalysisAll")
+
+# If a valid path is found, write the files
+if (!is.null(valid_path)) {
+  for (file_name in file_paths) {
+    write.xlsx(get(file_name), paste0(valid_path, "/Outputs/", file_name, ".xlsx"), rowNames = FALSE, firstRow = TRUE)
+  }
+} else {
+  stop("Neither directory exists.")
+}
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+
+```
+
+
+
+#** Automated Processing of all Subjects to visualize and compare between raw and Prediction/fitted Cosine wave in Excel Weekday vs Weekend
+```{r}
+# Define the Loop lists
+subjectnames <- unique(CorsanoAnalysissplit$Subject)
+weekz <- unique(CorsanoAnalysissplit$Week)
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+if (!exists("processed_subjects2")) {
+  processed_subjects2 <- character()
+}
+
+# WaveData
+if (!exists("CorsanoAnalysisWave")) {
+  CorsanoAnalysisWave <- data.frame()
+}
+
+# Function to replace NULL and NaN with NA
+  replace_nan_with_NA <- function(x) {
+    if(is.null(x)) {
+    return(NA)
+    } else {
+      x[is.nan(x)] <- NA
+      return(x)
+      }
+  }
+  
+  
+  #subjectnames <- processed_subjects2 
+  #subject_id <- "KNTA2T5K"
+  #subjectnames <- gsub(paste0("\\b",subject_id,"\\b"), "", subjectnames)
+  #subjectnames <- subjectnames[subjectnames != ""]  
+  #processed_subjects2 <- subjectnames
+
+# Check and remove subject if it has already been processed
+for (subject_id in processed_subjects2) {
+  
+  # Remove processed subject's folder
+  subjectnames <- gsub(paste0("\\b",subject_id,"\\b"), "", subjectnames)
+  subjectnames <- subjectnames[subjectnames != ""]  
+  cat("Patient", subject_id, "already processed. Skipping.\n")
+}
+
+
+# Loop through each subject
+for (subject in subjectnames) {
+    cat("Processing Patient:", subject, "\n")
+  
+  
+    # Create a folder for the current subject (if it doesn't already exist)
+    subject_folder <- paste0(valid_path, "/Graphs/", subject)
+    if (!dir.exists(subject_folder)) {
+        dir.create(subject_folder, recursive = TRUE)
+        cat("Created folder for patient:", subject, "\n")
+    }
+  
+  # Loop through weekdays and weekends
+  for (dayz in weekz) {
+    cat("Processing Day:", dayz, "\n")
+    
+    # Initialize empty data frame for Wavedatatmp
+      Wavedatatmp <- data.frame()
+    
+    # Loop through metrics
+    for (bio in biolist) {
+      cat("Processing biometric:", bio, "\n")
+      
+  
+      # Filter data for the current subject
+      GLMMSplit <- CorsanoAnalysissplit %>%
+        filter(Subject == subject,
+               Week == dayz)
+      
+      #** Skip if GLMMSplit has less than 70 rows **
+      if (nrow(GLMMSplit) < 70)  {
+      next
+      } 
+
+      # Run GLMM Cosinor Analysis
+      SplitModel2 <- cglmm(as.formula(paste(
+        bio, "~ amp_acro(
+        time_col = 'Time', 
+        period = c(24, 12), 
+        n_components = 2)")),
+      data = GLMMSplit)
+     
+      # Create Graphable data
+      prediction <- predict(SplitModel2, GLMMSplit)
+      Wavedatatmp1 <- GLMMSplit[, c("Time", bio)]
+      Wavedatatmp1[[paste0(bio, "Cosine")]] <- prediction
+      
+      Wavedatatmp1 <- Wavedatatmp1 %>%
+        group_by(Time) %>%
+        summarise(
+                  !!paste0(bio, "SEM") := sd(!!sym(bio), na.rm = TRUE) / sqrt(sum(!is.na(!!sym(bio)))),
+                  !!paste0(bio) := mean(!!sym(bio), na.rm = TRUE),
+                  !!paste0(bio, "Cosine") := mean(!!sym(paste0(bio, "Cosine")))
+                  )
+      
+      # Join this biomarker's results to the cumulative data frame (Wavedatatmp)
+            if (nrow(Wavedatatmp) == 0) {
+                Wavedatatmp <- Wavedatatmp1  # If it's the first biomarker, directly assign
+            } else {
+                Wavedatatmp <- left_join(Wavedatatmp, Wavedatatmp1, by = "Time")  # Add new columns for subsequent biomarkers
+            }
+      
+      
+        } # End of loop for each metric
+      
+      
+      #** Skip if GLMMSplit has less than 70 rows *
+      if (nrow(GLMMSplit) > 70)  {
+
+        # Create Double graph
+        Wavedatatmp2 <- Wavedatatmp %>%
+          mutate(Time = Time + 24) %>%
+          filter(Time != 24)
+        
+        Wavedata <- bind_rows(Wavedatatmp, Wavedatatmp2)
+        Wavedata <- Wavedata %>%
+          select(Time, CBT, CBTCosine, CBTSEM, HR, HRCosine, HRSEM, Breath, BreathCosine, BreathSEM, HRV, HRVCosine, HRVSEM, RR, RRCosine, RRSEM,
+                 Cortisol,
+                 CortisolCosine, CortisolSEM, Stress, StressCosine, StressSEM, SBT, SBTCosine, SBTSEM, Steps, StepsCosine, StepsSEM, Energy,
+                 EnergyCosine, EnergySEM)
+      
+        # Replace all NaN with NA
+        Wavedata <- as.data.frame(lapply(Wavedata, replace_nan_with_NA))
+          
+          
+          
+       #** Export the data *
+          export_path <- paste0(subject_folder, "/", subject, " ", dayz, " Wave", ".xlsx")
+          write.xlsx(Wavedata, export_path, rowNames = FALSE, firstRow = TRUE)
+          
+        #** Copy Data into Graphing Template **
+        Template <- paste0(valid_path, "/Graphing Template.xlsx")
+        Graph <- paste0(valid_path, "/Graphs/", subject, "/", subject, ".xlsx")
+        
+          if (!file.exists(Graph)) {
+            file.copy(from = Template, to = Graph)
+          }
+        
+          # Check if the file was copied successfully
+            if (file.exists(Graph)) {
+              cat("File copied and renamed successfully to:", subject,"\n")
+            } else {
+              cat("Failed to copy and rename the file.\n")
+            }
+        
+        
+        #** Making Edits to Graph **
+        # Load the workbook into R
+        wb <- loadWorkbook(Graph)
+        
+        # Load data into appropriate sheet
+        writeData(wb, sheet = dayz, x = Wavedata)
+        
+        # Save modified workbook
+        saveWorkbook(wb, Graph, overwrite = TRUE)
+        cat("Graph for", subject,"successfully made and saved\n")
+        
+        
+        
+        #** Save the Wave Data **
+        Wavedatatmp3 <- Wavedata %>%
+          select(Time, CBTCosine, HRCosine, BreathCosine, HRVCosine, RRCosine, CortisolCosine, StressCosine, SBTCosine, StepsCosine, EnergyCosine) %>%
+          mutate(Subject = subject,
+                 Week = dayz)
+        
+        CorsanoAnalysisWave <- rbind(CorsanoAnalysisWave, Wavedatatmp3)
+        
+        
+        
+      } else {
+        cat("Skipping due to insufficient data\n")
+        next
+        } 
+
+      # Clear out Wavedatatmp for next loop  
+        rm(Wavedatatmp)
+
+    } # End of Weekday vs Weekend
+    # Add subject to processed list after it's complete
+    processed_subjects2 <- c(processed_subjects2, paste0(subject))
+  } # End of entire loop
+  
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+#** Automated Processing of all Subjects to visualize and compare between raw and Prediction/fitted Cosine wave in Excel for Everyday
+```{r}
+# Define the Loop lists
+subjectnames <- unique(CorsanoAnalysissplit$Subject)
+weekz <- "Both"
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+if (!exists("processed_subjects3")) {
+  processed_subjects3 <- character()
+}
+
+# WaveData
+if (!exists("CorsanoAnalysisWave")) {
+  CorsanoAnalysisWave <- data.frame()
+}
+
+
+# Function to replace NULL and NaN with NA
+  replace_nan_with_NA <- function(x) {
+    if(is.null(x)) {
+    return(NA)
+    } else {
+      x[is.nan(x)] <- NA
+      return(x)
+      }
+  }
+
+
+# Check and remove subject if it has already been processed
+for (subject_id in processed_subjects3) {
+  
+  # Remove processed subject's folder
+  subjectnames <- gsub(paste0("\\b",subject_id,"\\b"), "", subjectnames)
+  subjectnames <- subjectnames[subjectnames != ""]  
+  cat("Patient", subject_id, "already processed. Skipping.\n")
+}
+
+
+# Loop through each subject
+for (subject in subjectnames) {
+    cat("Processing Patient:", subject, "\n")
+  
+  
+    # Create a folder for the current subject (if it doesn't already exist)
+    subject_folder <- paste0(valid_path, "/Graphs/", subject)
+    if (!dir.exists(subject_folder)) {
+        dir.create(subject_folder, recursive = TRUE)
+        cat("Created folder for patient:", subject, "\n")
+    }
+  
+
+  # Loop through weekdays and weekends
+  #for (dayz in weekz) {
+    #cat("Processing Day:", dayz, "\n")
+    
+    # Initialize empty data frame for Wavedatatmp
+      Wavedatatmp <- data.frame()
+    
+        # Loop through metrics
+    for (bio in biolist) {
+      cat("Processing biometric:", bio, "\n")
+      
+  
+      # Filter data for the current subject
+      GLMMSplit <- CorsanoAnalysissplit %>%
+        filter(Subject == subject)
+      
+      #** Skip if GLMMSplit has less than 70 rows **
+      if (nrow(GLMMSplit) < 70)  {
+      next
+      } 
+
+      # Run GLMM Cosinor Analysis
+      SplitModel2 <- cglmm(as.formula(paste(
+        bio, "~ amp_acro(
+        time_col = 'Time', 
+        period = c(24, 12), 
+        n_components = 2)")),
+      data = GLMMSplit)
+     
+      # Create Graphable data
+      prediction <- predict(SplitModel2, GLMMSplit)
+      Wavedatatmp1 <- GLMMSplit[, c("Time", bio)]
+      Wavedatatmp1[[paste0(bio, "Cosine")]] <- prediction
+      
+      Wavedatatmp1 <- Wavedatatmp1 %>%
+        group_by(Time) %>%
+        summarise(
+                  !!paste0(bio, "SEM") := sd(!!sym(bio), na.rm = TRUE) / sqrt(sum(!is.na(!!sym(bio)))),
+                  !!paste0(bio) := mean(!!sym(bio), na.rm = TRUE),
+                  !!paste0(bio, "Cosine") := mean(!!sym(paste0(bio, "Cosine")))
+                  )
+      
+      # Join this biomarker's results to the cumulative data frame (Wavedatatmp)
+            if (nrow(Wavedatatmp) == 0) {
+                Wavedatatmp <- Wavedatatmp1  # If it's the first biomarker, directly assign
+            } else {
+                Wavedatatmp <- left_join(Wavedatatmp, Wavedatatmp1, by = "Time")  # Add new columns for subsequent biomarkers
+            }
+      
+      
+        } # End of loop for each metric
+      
+      
+      #** Skip if GLMMSplit has less than 70 rows *
+      if (nrow(GLMMSplit) > 70)  {
+
+        # Create Double graph
+        Wavedatatmp2 <- Wavedatatmp %>%
+          mutate(Time = Time + 24) %>%
+          filter(Time != 24)
+        
+        Wavedata <- bind_rows(Wavedatatmp, Wavedatatmp2)
+        Wavedata <- Wavedata %>%
+          select(Time, CBT, CBTCosine, CBTSEM, HR, HRCosine, HRSEM, Breath, BreathCosine, BreathSEM, HRV, HRVCosine, HRVSEM, RR, RRCosine, RRSEM,
+                 Cortisol,
+                 CortisolCosine, CortisolSEM, Stress, StressCosine, StressSEM, SBT, SBTCosine, SBTSEM, Steps, StepsCosine, StepsSEM, Energy,
+                 EnergyCosine, EnergySEM)
+      
+        # Replace all NaN with NA
+        Wavedata <- as.data.frame(lapply(Wavedata, replace_nan_with_NA))
+          
+          
+          
+       #** Export the data *
+          export_path <- paste0(subject_folder, "/", subject, " ", weekz, " Wave", ".xlsx")
+          write.xlsx(Wavedata, export_path, rowNames = FALSE, firstRow = TRUE)
+          
+        #** Copy Data into Graphing Template **
+        Template <- paste0(valid_path, "/Graphing Template 2.xlsx")
+        Graph <- paste0(valid_path, "/Graphs/", subject, "/", subject, "All.xlsx")
+        
+          # Check if the file already exists and delete it if it does
+          if (file.exists(Graph)) {
+            file.remove(Graph)
+          }
+        
+        # Copy Template
+        file.copy(from = Template, to = Graph)
+                  
+          #if (!file.exists(Graph)) {
+          #  file.copy(from = Template, to = Graph)
+          #}
+        
+          # Check if the file was copied successfully
+            if (file.exists(Graph)) {
+              cat("File copied and renamed successfully to:", subject,"\n")
+            } else {
+              cat("Failed to copy and rename the file.\n")
+            }
+        
+        
+        #** Making Edits to Graph **
+        # Load the workbook into R
+        wb <- loadWorkbook(Graph)
+        
+        # Load data into appropriate sheet
+        writeData(wb, sheet = "Raw", x = Wavedata)
+        
+        # Save modified workbook
+        saveWorkbook(wb, Graph, overwrite = TRUE)
+        cat("Graph for", subject,"successfully made and saved\n")
+        
+        
+        
+        #** Save the Wave Data **
+        Wavedatatmp3 <- Wavedata %>%
+          select(Time, CBTCosine, HRCosine, BreathCosine, HRVCosine, RRCosine, CortisolCosine, StressCosine, SBTCosine, StepsCosine, EnergyCosine) %>%
+          mutate(Subject = subject,
+                 Week = weekz)
+        
+        CorsanoAnalysisWave <- rbind(CorsanoAnalysisWave, Wavedatatmp3)
+        
+        
+      } else {
+        cat("Skipping due to insufficient data\n")
+        next
+        } 
+
+      # Clear out Wavedatatmp for next loop  
+        rm(Wavedatatmp)
+    #} # End of Outer loop for #BOTH
+    # Add subject to processed list after it's complete
+    processed_subjects3 <- c(processed_subjects3, paste0(subject))
+  } # End of entire loop
+  
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+#* Statistical Analysis Output
+```{r}
+# Define the Loop lists
+subjectnames <- unique(CorsanoAnalysisWave$Subject)
+weekz <- unique(CorsanoAnalysisWave$Week)
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+
+if (file.exists(paste0(valid_path, "/Documentations/patients.xlsx"))) {
+  PT <- read.xlsx(paste0(valid_path, "/Documentations/patients.xlsx"))
+} 
+
+# Function to replace NULL and NaN with NA
+  replace_nan_with_NA <- function(x) {
+    if(is.null(x)) {
+    return(NA)
+    } else {
+      x[is.nan(x)] <- NA
+      return(x)
+      }
+  }
+
+# Check to see if Stat has been created yet
+if (!is.data.frame(Stat)) {
+  Stat <- data.frame()
+}
+
+# Initialize empty data frame for stattmp
+  Stattmp <- data.frame()
+  
+# Check and remove subject if it has already been processed
+if (!exists("processed_subjects1")) {
+  processed_subjects1 <- character()
+}  
+
+for (subject_id in processed_subjects1) {
+  
+  # Remove processed subject's folder
+  subjectnames <- gsub(paste0("\\b", subject_id, "\\b"), "", subjectnames)
+  subjectnames <- subjectnames[subjectnames != ""]  
+  cat("Patient", subject_id, "already processed. Skipping.\n")
+}
+  
+# Loop through each subject
+for (subject in subjectnames) {
+    cat("Processing Subject:", subject, "\n")
+  
+  # Loop through weekdays and weekends
+  for (dayz in weekz) {
+    cat("Processing Day:", dayz, "\n")
+    
+      # Filter data for the current subject
+      GLMMSplit <- CorsanoAnalysisWave %>%
+        filter(Subject == subject,
+               Week == dayz) %>%
+        rename(CBT = CBTCosine,
+               HR = HRCosine,
+               Breath = BreathCosine,
+               HRV = HRVCosine,
+               RR = RRCosine,
+               Cortisol = CortisolCosine,
+               Stress = StressCosine,
+               SBT = SBTCosine,
+               Steps = StepsCosine,
+               Energy = EnergyCosine)
+    
+    # Loop through metrics
+    for (bio in biolist) {
+      cat("Processing biometric:", bio, "\n")
+
+      
+      #** Skip if GLMMSplit has less than 70 rows or if any column has more than 37 consecutive NAs **
+      if (nrow(GLMMSplit) < 70 || any(rle(is.na(GLMMSplit[[bio]]))$lengths[which(rle(is.na(GLMMSplit[[bio]]))$values)] > 37)) {
+        cat("Skipping due to insufficient data \n")
+        next
+      }
+          
+          # Calculate min and minTime
+          min <- min(GLMMSplit[[bio]], na.rm = TRUE)
+          minTime <- GLMMSplit$Time[which.min(GLMMSplit[[bio]])]
+          
+          # Calculate max and maxTime
+          max <- max(GLMMSplit[[bio]], na.rm = TRUE)
+          maxTime <- GLMMSplit$Time[which.max(GLMMSplit[[bio]])]
+          
+          # Calculate Amp
+          amp <- (max - min)/2
+          
+          # Calculate MESOR
+          mesor <- mean(GLMMSplit[[bio]], na.rm = TRUE)
+          
+          test_long <- data.frame(Amplitude = amp,
+                                  Mesor = mesor,
+                                  PPhase = maxTime,
+                                  TPhase = minTime,
+                                  Max = max,
+                                  Min = min,
+                                  Bio = paste0(bio),
+                                  Patient = paste0(subject),
+                                  week = dayz)
+          
+      # Join the new row with patient data from PT
+        if (exists("PT")) {
+        test_long <- test_long %>%
+                left_join(PT, by = c("Patient" = "Patient.Code")) # Assuming 'Subject' is the column in PT
+        }
+          
+      # Join this biomarker's results to the cumulative data frame (Wavedatatmp)
+            if (nrow(Stattmp) == 0) {
+                Stattmp <- test_long  # If it's the first biomarker, directly assign
+            } else {
+                Stattmp <- rbind(Stattmp, test_long)
+            }
+      
+          } # End of loop for each metric
+      } # End of Weekday vs Weekend
+        # Add subject to processed list after it's complete
+         processed_subjects1 <- c(processed_subjects1, paste0(subject))
+  } # End of entire loop
+
+#** If there is no new data to process, skip this next part **
+if (!is.null(subject)) {
+  
+    Stattmp <- Stattmp %>%
+    group_by(Bio, Patient, week) %>%
+    arrange(Patient, Bio)
+    
+} else {}
+  Stat <- bind_rows(Stat, Stattmp)
+  
+  
+
+ #** Export the data *
+    export_path <- paste0(valid_path, "/Stats/Full Statistics.xlsx")
+    write.xlsx(Stat, export_path, rowNames = FALSE, firstRow = TRUE)
+        
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))     
+```
+
+
+
+
+      
+
+
+
+
+
+
+

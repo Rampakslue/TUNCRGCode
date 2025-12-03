@@ -1,0 +1,1683 @@
+---
+title: "Jet Lag quick analysis"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+
+#**================================================================**
+#** Libraries and Environment Setup                  **
+#**================================================================**
+```{r}
+#** Load necessary libraries *
+# Using pacman to install and load packages in one step
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  # Original Libraries
+  dplyr,          # For data manipulation
+  tidyr,          # For data tidying
+  openxlsx,       # For reading/writing Excel files
+  lubridate,      # For easier date-time manipulation
+  data.table,     # For efficient data handling, especially rleid
+  pracma,         # For findpeaks
+  GLMMcosinor,    # For generalized linear mixed cosinor models
+  circacompare,   # For comparing circadian rhythms
+  tidyverse,      # A collection of R packages for data science
+  brms,           # For Bayesian regression models using Stan
+  rstanarm,       # For Bayesian models via RStan
+  paletteer,      # Provides a collection of color palettes
+  ggcorrplot,     # For visualizing correlation matrices
+  ggpubr,         # For publication-ready plots
+  corrr,          # For exploring correlations
+  qgraph,         # For network analysis and visualization
+  combinat,       # For combinatorics
+  zoo,            # For ordered time series data
+  caret,          # For classification and regression training
+  janitor,        # For simple data cleaning
+  pwr,            # For power analysis
+  lmPerm,         # For permutation tests for linear models
+  mgcv,            # For permutation tests for GAM
+  pwr,
+  rstatix,
+  hms,
+  fs,
+  car
+  
+)
+
+#** --- Set up a valid path --- *
+# Define base paths for both possible directories
+base_paths <- c(
+  "E:/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging",
+  "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging"
+)
+
+# Find the first existing directory
+valid_path <- first(base_paths[dir.exists(base_paths)])
+
+if (is.na(valid_path)) {
+  stop("Neither of the specified base directories exists. Please check the paths.")
+}
+
+#** --- Define objects to keep --- *
+# This list helps in managing the global environment
+CoreDatasets <- c(
+"CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP", "CorsanoShiftWave", "Variability", "Stability", "SJL", "StatSS", "SLEEP1", "AmpMesAge", "AmpMesGen", "BioBmiStats", "DeviationsS", "SJLDeviations", "SJLBIO", "jsl_summary", "Jetlag", "biolist", "PhysCog", "Aging", "AgingA", "SJL2", "SJLBio"
+)
+
+
+# Biolist
+biolist <- c("HR", "Steps", "Energy", "Breath", "HRV", "RR", "Cortisol", "Stress", "SBT", "CBT")
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+# Clean StatSS for use in analysis
+```{r}
+SJL <- StatSS %>%
+  clean_names()
+```
+
+
+#**================================================================**
+#** All biometric Amplitude and mesor analysis vs age and gender   **
+#**================================================================**
+```{r}
+
+# --- INITIALIZE DATAFRAMES TO STORE RESULTS ---
+
+# For Age-based analysis of Amplitude and Mesor correlations
+AmpMesAge <- data.frame(
+  Biometric = character(),
+  week = character(),
+  age_group = character(),
+  amp_corr_estimate = numeric(),
+  amp_CI95 = character(),
+  amp_pvalue = numeric(),
+  amp_power = numeric(),
+  mesor_corr_estimate = numeric(),
+  mesor_CI95 = character(),
+  mesor_pvalue = numeric(),
+  mesor_power = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# For Gender-based analysis of Amplitude and Mesor differences
+AmpMesGen <- data.frame(
+  Biometric = character(),
+  week = character(),
+  Famplitude_mean = numeric(),
+  Mamplitude_mean = numeric(),
+  amp_CI95_diff = character(),
+  amp_pvalue = numeric(),
+  amp_power = numeric(),
+  Fmesor_mean = numeric(),
+  Mmesor_mean = numeric(),
+  mesor_CI95_diff = character(),
+  mesor_pvalue = numeric(),
+  mesor_power = numeric(),
+  stringsAsFactors = FALSE
+)
+
+
+#' Perform Analysis and capture statistical results into dataframes
+#'
+#' @param main_data The main dataframe (e.g., SJL).
+#' @param period A string specifying the period to analyze: "Weekend", "Weekday", or "Both".
+#' @param biometric A string specifying the biometric to analyze (e.g., "CBT", "HR").
+analyze_bio_data <- function(main_data, period, biometric) {
+
+  cat(paste("\n\n======================================================\n"))
+  cat(paste("   PROCESSING:", biometric, "-", period, "\n"))
+  cat(paste("======================================================\n\n"))
+
+  # --- Filter Data ---
+  SJLFiltered <- main_data %>%
+    filter(!is.na(gender),
+           bio == biometric,
+           week == period)
+
+  if (nrow(SJLFiltered) < 2) {
+    cat(paste("Skipping: Not enough data for", biometric, "-", period, "\n"))
+    return(invisible(NULL))
+  }
+
+  # --- Visualizations (Distribution and Box Plots) ---
+  # These plots are kept for visual inspection during the run.
+  # ... (visualization code remains largely the same) ...
+  
+  # --- Gender Differences in AMPLITUDE & MESOR ---
+  female_amplitude <- SJLFiltered %>% filter(gender == "female") %>% pull(amplitude)
+  male_amplitude <- SJLFiltered %>% filter(gender == "male") %>% pull(amplitude)
+  female_mesor <- SJLFiltered %>% filter(gender == "female") %>% pull(mesor)
+  male_mesor <- SJLFiltered %>% filter(gender == "male") %>% pull(mesor)
+
+  # Initialize variables to NA
+  f_amp_mean <- NA; m_amp_mean <- NA; amp_ci_diff <- NA; amp_p <- NA; amp_pow <- NA
+  f_mes_mean <- NA; m_mes_mean <- NA; mes_ci_diff <- NA; mes_p <- NA; mes_pow <- NA
+
+  # Amplitude T-Test
+  if (length(female_amplitude) > 1 && length(male_amplitude) > 1) {
+    t_test_amp <- t.test(female_amplitude, male_amplitude)
+    f_amp_mean <- t_test_amp$estimate[1]
+    m_amp_mean <- t_test_amp$estimate[2]
+    amp_ci_diff <- paste(round(t_test_amp$conf.int, 3), collapse = " to ")
+    amp_p <- t_test_amp$p.value
+    
+    # Power for amplitude
+    cohen_d_amp <- abs(f_amp_mean - m_amp_mean) / sd(c(female_amplitude, male_amplitude))
+    if(!is.na(cohen_d_amp) && cohen_d_amp > 0) {
+        power_amp_res <- pwr.t2n.test(n1 = length(female_amplitude), n2 = length(male_amplitude), d = cohen_d_amp, sig.level = 0.05)
+        amp_pow <- power_amp_res$power
+    }
+  }
+
+  # Mesor T-Test
+  if (length(female_mesor) > 1 && length(male_mesor) > 1) {
+    t_test_mesor <- t.test(female_mesor, male_mesor)
+    f_mes_mean <- t_test_mesor$estimate[1]
+    m_mes_mean <- t_test_mesor$estimate[2]
+    mes_ci_diff <- paste(round(t_test_mesor$conf.int, 3), collapse = " to ")
+    mes_p <- t_test_mesor$p.value
+
+    # Power for mesor
+    cohen_d_mesor <- abs(f_mes_mean - m_mes_mean) / sd(c(female_mesor, male_mesor))
+     if(!is.na(cohen_d_mesor) && cohen_d_mesor > 0) {
+        power_mesor_res <- pwr.t2n.test(n1 = length(female_mesor), n2 = length(male_mesor), d = cohen_d_mesor, sig.level = 0.05)
+        mes_pow <- power_mesor_res$power
+    }
+  }
+
+  # Add results to AmpMesGen dataframe
+  AmpMesGen <<- AmpMesGen %>%
+    add_row(
+      Biometric = biometric, week = period,
+      Famplitude_mean = f_amp_mean, Mamplitude_mean = m_amp_mean,
+      amp_CI95_diff = amp_ci_diff, amp_pvalue = amp_p, amp_power = amp_pow,
+      Fmesor_mean = f_mes_mean, Mmesor_mean = m_mes_mean,
+      mesor_CI95_diff = mes_ci_diff, mesor_pvalue = mes_p, mesor_power = mes_pow
+    )
+
+  # --- Amplitude & Mesor vs. Age Analysis by Age Group ---
+  SJLFiltered <- SJLFiltered %>%
+    mutate(age_group = cut(age,
+                           breaks = c(19, 40, 70, Inf),
+                           labels = c("20-40", "41-70", "71+"),
+                           include.lowest = TRUE))
+    
+  age_groups <- unique(SJLFiltered$age_group)
+  age_groups <- age_groups[!is.na(age_groups)]
+
+  for(ag in age_groups) {
+    group_data <- SJLFiltered %>% filter(age_group == ag)
+
+    amp_corr <- NA; amp_ci <- NA; amp_p <- NA; amp_pow <- NA
+    mes_corr <- NA; mes_ci <- NA; mes_p <- NA; mes_pow <- NA
+    
+    # Amplitude vs Age Correlation
+    if (nrow(group_data) > 2) {
+      cor_test_amp <- cor.test(group_data$age, group_data$amplitude, method = "pearson")
+      amp_corr <- cor_test_amp$estimate
+      amp_ci <- paste(round(cor_test_amp$conf.int, 3), collapse = " to ")
+      amp_p <- cor_test_amp$p.value
+      amp_pow_res <- pwr.r.test(n = nrow(group_data), r = amp_corr, sig.level = 0.05)
+      amp_pow <- amp_pow_res$power
+
+      # NEW: Visualization of Amplitude vs. Age
+      plot_amp_age <- ggplot(group_data, aes(x = age, y = amplitude)) +
+        geom_point(alpha = 0.7, color = "blue") +
+        geom_smooth(method = "lm", se = FALSE, color = "red") +
+        labs(
+          title = paste(biometric, "Amplitude vs. Age -", period),
+          subtitle = paste("Age Group:", ag),
+          x = "Age",
+          y = "Amplitude"
+        ) +
+        theme_minimal()
+      print(plot_amp_age)
+    }
+    
+    # Mesor vs Age Correlation
+    if (nrow(group_data) > 2) {
+      cor_test_mes <- cor.test(group_data$age, group_data$mesor, method = "pearson")
+      mes_corr <- cor_test_mes$estimate
+      mes_ci <- paste(round(cor_test_mes$conf.int, 3), collapse = " to ")
+      mes_p <- cor_test_mes$p.value
+      mes_pow_res <- pwr.r.test(n = nrow(group_data), r = mes_corr, sig.level = 0.05)
+      mes_pow <- mes_pow_res$power
+      
+      # NEW: Visualization of Mesor vs. Age
+      plot_mes_age <- ggplot(group_data, aes(x = age, y = mesor)) +
+        geom_point(alpha = 0.7, color = "purple") +
+        geom_smooth(method = "lm", se = FALSE, color = "orange") +
+        labs(
+          title = paste(biometric, "Mesor vs. Age -", period),
+          subtitle = paste("Age Group:", ag),
+          x = "Age",
+          y = "Mesor"
+        ) +
+        theme_minimal()
+      print(plot_mes_age)
+    }
+
+    # Add results to AmpMesAge dataframe
+    AmpMesAge <<- AmpMesAge %>%
+      add_row(
+        Biometric = biometric, week = period, age_group = as.character(ag),
+        amp_corr_estimate = amp_corr, amp_CI95 = amp_ci, amp_pvalue = amp_p, amp_power = amp_pow,
+        mesor_corr_estimate = mes_corr, mesor_CI95 = mes_ci, mesor_pvalue = mes_p, mesor_power = mes_pow
+      )
+  }
+}
+
+# --- RUN THE ANALYSIS FOR EACH BIOMETRIC AND PERIOD ---
+unique_bios <- unique(SJL$bio)
+unique_bios <- unique_bios[!is.na(unique_bios)]
+periods <- c("Weekend", "Weekday", "Both")
+
+for (current_bio in unique_bios) {
+  for (current_period in periods) {
+    # Use tryCatch to prevent one error from stopping the entire loop
+    try(analyze_bio_data(SJL, current_period, current_bio), silent = TRUE)
+  }
+}
+
+# --- DISPLAY FINAL RESULTS ---
+cat("\n\n======================================================\n")
+cat("           RESULTS SUMMARY - GENDER ANALYSIS\n")
+cat("======================================================\n\n")
+print(head(AmpMesGen))
+
+cat("\n\n======================================================\n")
+cat("            RESULTS SUMMARY - AGE ANALYSIS\n")
+cat("======================================================\n\n")
+print(head(AmpMesAge))
+
+# --- Export the Final Data ---
+export_path <- file.path(valid_path, "Stats", "AmpMesAge.xlsx")
+write.xlsx(AmpMesAge, export_path, rowNames = FALSE, firstRow = TRUE)
+cat("Analysis complete. Data exported to:", export_path, "\n")
+export_path <- file.path(valid_path, "Stats", "AmpMesGender.xlsx")
+write.xlsx(AmpMesGen, export_path, rowNames = FALSE, firstRow = TRUE)
+cat("Analysis complete. Data exported to:", export_path, "\n")
+
+# --- NEW ANALYSIS: Overall Age vs. Amplitude for "Both" Period ---
+cat("\n\n======================================================\n")
+cat("   PLOTTING: Overall Age vs. Amplitude for 'Both' Period\n")
+cat("======================================================\n\n")
+
+# 1. Filter the main dataframe for the "Both" period
+SJLFilteredBoth <- SJL %>%
+  filter(week == "Both", !is.na(age), !is.na(amplitude))
+
+# 2. Get the unique biometrics to loop through from this filtered data
+unique_bios_both <- unique(SJLFilteredBoth$bio)
+unique_bios_both <- unique_bios_both[!is.na(unique_bios_both)]
+
+# 3. Loop through each biometric to create a plot
+for (current_bio in unique_bios_both) {
+  
+  # a. Filter for the current biometric
+  bio_data <- SJLFilteredBoth %>%
+    filter(bio == current_bio)
+  
+  # b. Check if there's enough data to plot
+  if (nrow(bio_data) > 2) {
+    cat(paste("--- Generating plot for:", current_bio, "---\n"))
+    
+    # c. Create the scatter plot
+    plot_age_amp <- ggplot(bio_data, aes(x = age, y = amplitude)) +
+      geom_point(alpha = 0.7, color = "darkcyan") +
+      geom_smooth(method = "lm", se = FALSE, color = "orangered") +
+      labs(
+        title = paste("Amplitude vs. Age for", current_bio),
+        subtitle = "Period: Both",
+        x = "Age",
+        y = "Amplitude"
+      ) +
+      theme_minimal()
+      
+    # d. Print the plot to the R console/plot pane
+    print(plot_age_amp)
+    
+  } else {
+    cat(paste("--- Skipping plot for:", current_bio, "(not enough data) ---\n"))
+  }
+}
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+
+
+```
+
+
+
+#**================================================================**
+#** All biometric Amplitude and mesor analysis vs BMI              **
+#**================================================================**
+```{r}
+# --- INITIALIZE DATAFRAME TO STORE RESULTS ---
+# This dataframe will collect all the statistical results from the BMI analysis.
+BioBmiStats <- data.frame(
+  Biometric = character(),
+  Period = character(),
+  Metric = character(),
+  Correlation_Estimate = numeric(),
+  CI_95 = character(),
+  P_Value = numeric(),
+  Power = numeric(),
+  SampleSize = integer(),
+  stringsAsFactors = FALSE
+)
+
+
+#' Perform Analysis for a specific biometric, period, and metric against BMI
+#'
+#' @param main_data The main dataframe (e.g., SJL).
+#' @param period A string specifying the period to analyze: "Weekend", "Weekday", or "Both".
+#' @param biometric A string specifying the biometric to analyze (e.g., "CBT", "HR").
+#' @param metric_to_compare A string for the column to correlate with BMI (e.g., "amplitude", "max").
+analyze_bio_data <- function(main_data, period, biometric, metric_to_compare) {
+
+  # Capitalize the first letter of the metric for clean labeling
+  metric_label <- paste0(toupper(substring(metric_to_compare, 1, 1)), substring(metric_to_compare, 2))
+
+  cat(paste("\n\n======================================================\n"))
+  cat(paste("   ANALYZING:", biometric, "-", period, " (Metric:", metric_label, "vs. BMI)\n"))
+  cat(paste("======================================================\n\n"))
+
+  # --- Filter Data ---
+  # Filter the data based on the specified biometric and period.
+  SJLFiltered <- main_data %>%
+    filter(!is.na(gender),
+           bio == biometric,
+           week == period,
+           !is.na(.data[[metric_to_compare]]), # Ensure the metric to compare is not NA
+           !is.na(bmi) # Ensure bmi is not NA
+           )
+
+  # Check if there is enough data to proceed
+  if (nrow(SJLFiltered) < 3) {
+    cat(paste("Skipping: Not enough data for", biometric, "-", period, "(Metric:", metric_label, ")\n"))
+    return(invisible(NULL)) # Exit the function
+  }
+
+  # --- Metric vs. BMI Correlation Analysis ---
+  
+  # Initialize variables to hold results
+  corr_est <- NA; ci_95 <- NA; p_val <- NA; power_val <- NA
+  
+  # Use tryCatch to handle potential errors during correlation testing
+  tryCatch({
+    cor_test_result <- cor.test(SJLFiltered$bmi, SJLFiltered[[metric_to_compare]], method = "pearson")
+    
+    # Extract results from the correlation test
+    corr_est <- cor_test_result$estimate
+    ci_95 <- paste(round(cor_test_result$conf.int, 3), collapse = " to ")
+    p_val <- cor_test_result$p.value
+    
+    # Power Analysis
+    if (!is.na(corr_est)) {
+      power_res <- pwr.r.test(n = nrow(SJLFiltered), r = corr_est, sig.level = 0.05)
+      power_val <- power_res$power
+    }
+  }, error = function(e) {
+    cat(paste("An error occurred during correlation test for", biometric, "-", period, ":", e$message, "\n"))
+  })
+
+  # --- Add Results to the Main DataFrame ---
+  # Use the <<- operator to modify the global BioBmiStats dataframe from within the function
+  BioBmiStats <<- BioBmiStats %>%
+    add_row(
+      Biometric = biometric,
+      Period = period,
+      Metric = metric_to_compare,
+      Correlation_Estimate = corr_est,
+      CI_95 = ci_95,
+      P_Value = p_val,
+      Power = power_val,
+      SampleSize = nrow(SJLFiltered)
+    )
+
+  # --- Visualization of Metric vs. BMI ---
+  # This part remains to provide a visual check of the relationship.
+  # ... (visualization code remains the same) ...
+  Q1_metric <- quantile(SJLFiltered[[metric_to_compare]], 0.25, na.rm = TRUE)
+  Q3_metric <- quantile(SJLFiltered[[metric_to_compare]], 0.75, na.rm = TRUE)
+  IQR_metric <- Q3_metric - Q1_metric
+  lower_bound_metric <- Q1_metric - 1.5 * IQR_metric
+  upper_bound_metric <- Q3_metric + 1.5 * IQR_metric
+
+  scatter_plot_bmi <- ggplot(SJLFiltered, aes(x = bmi, y = .data[[metric_to_compare]])) +
+    geom_point(color = "blue") +
+    geom_smooth(method = "lm", se = FALSE, color = "red") +
+    labs(title = paste(biometric, metric_label, "vs. BMI -", period),
+         x = "BMI",
+         y = paste(biometric, metric_label)) +
+    theme_minimal() +
+    coord_cartesian(ylim = c(lower_bound_metric, upper_bound_metric))
+  
+  print(scatter_plot_bmi)
+}
+
+# --- RUN THE ANALYSIS FOR EACH BIOMETRIC AND PERIOD ---
+
+# Define the specific biometrics and metrics to analyze
+biometrics_to_analyze <- unique(na.omit(SJL$bio))
+metrics_to_analyze <- c("amplitude", "max", "min", "mesor")
+periods <- c("Weekend", "Weekday", "Both")
+
+# Loop through each biometric, then each period, then each metric, and run the analysis
+for (current_bio in biometrics_to_analyze) {
+  for (current_period in periods) {
+    for (current_metric in metrics_to_analyze) {
+      # Use try() to ensure one error doesn't stop the entire loop
+      try(analyze_bio_data(SJL, current_period, current_bio, current_metric))
+    }
+  }
+}
+
+# --- DISPLAY FINAL RESULTS DATAFRAME ---
+cat("\n\n======================================================\n")
+cat("          RESULTS SUMMARY - BIOMETRIC vs. BMI\n")
+cat("======================================================\n\n")
+print(head(BioBmiStats))
+
+
+# --- Export the Final Data ---
+export_path <- file.path(valid_path, "Stats", "BMI.xlsx")
+write.xlsx(BioBmiStats, export_path, rowNames = FALSE, firstRow = TRUE)
+cat("Analysis complete. Data exported to:", export_path, "\n")
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+#**================================================================**
+#** Correlations of amplitude between biometrics between age groups**
+#**================================================================**
+```{r}
+# --- Optimized Correlation Analysis of Biometric Amplitudes by Age Group ---
+
+# 1. Prepare the data in a single, chained operation
+amplitude_data <- SJL %>%
+  filter(!is.na(week), week == "Weekday") %>%
+  mutate(age_group = cut(age,
+                         breaks = c(19, 40, 70, Inf),
+                         labels = c("20-40", "41-70", "71+"),
+                         include.lowest = TRUE)) %>%
+  # Summarize multiple readings by taking the average amplitude
+  group_by(patient, bio, age_group) %>%
+  summarise(amplitude = mean(amplitude, na.rm = TRUE), .groups = 'drop') %>%
+  na.omit()
+
+# 2. Get unique age groups to iterate over
+age_groups <- unique(amplitude_data$age_group)
+
+# 3. Initialize lists to store results for each group
+correlation_list <- list()
+matrices_to_export <- list() 
+
+# Helper function to calculate pairwise sample sizes (n)
+pairwise_n <- function(df) {
+  as.matrix(t(!is.na(df))) %*% as.matrix(!is.na(df))
+}
+
+# Determine a master order for biometrics to ensure consistent axes
+all_data_wide <- amplitude_data %>%
+  tidyr::pivot_wider(names_from = bio, values_from = amplitude) %>%
+  select(-patient, -age_group)
+master_cor_matrix <- cor(all_data_wide, use = "pairwise.complete.obs")
+master_order <- colnames(master_cor_matrix)[hclust(dist(master_cor_matrix))$order]
+
+# Define the output directory for exports at the beginning
+# This assumes 'valid_path' is defined earlier in your script. If not, set it here.
+# For example: valid_path <- getwd() 
+output_dir <- file.path(valid_path, "Stats")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+  cat("Created directory:", output_dir, "\n")
+}
+
+
+# 4. Use a single loop to perform analysis, visualization, and data extraction
+for (group in age_groups) {
+  
+  # a. Filter data for the current age group and pivot to wide format
+  group_data_wide <- amplitude_data %>%
+    filter(age_group == group) %>%
+    tidyr::pivot_wider(names_from = bio, values_from = amplitude) %>%
+    select(-patient, -age_group) 
+
+  # b. Check if there's enough data for correlation
+  if (ncol(group_data_wide) > 1) {
+    
+    # c. Calculate correlation and sample size matrices ONCE
+    cor_matrix <- cor(group_data_wide, use = "pairwise.complete.obs")
+    n_matrix <- pairwise_n(group_data_wide)
+
+    # Store the formatted matrix for Excel export
+    matrices_to_export[[as.character(group)]] <- as.data.frame(cor_matrix) %>%
+      rownames_to_column("Biometric")
+
+    # d. Print the correlation matrix
+    cat("\n--- Correlation Matrix for Age Group:", as.character(group), "---\n")
+    print(cor_matrix)
+
+    # e. Visualize the correlation matrix
+    cat("\n--- Visualizing Correlation for Age Group:", as.character(group), "---\n")
+    
+    # Reorder the current group's matrix based on the master order
+    plot_order <- master_order[master_order %in% colnames(cor_matrix)]
+    cor_matrix_ordered <- cor_matrix[plot_order, plot_order]
+    
+    corr_plot <- ggcorrplot(cor_matrix_ordered,
+                            hc.order = FALSE,
+                            type = "lower",
+                            lab = TRUE,
+                            lab_size = 3,
+                            title = paste("Correlation of Biometric Amplitudes -", group, "Group"))
+    print(corr_plot)
+    
+    # Export the plot to a PNG file
+    plot_filename <- paste0("Correlation Matrix ", gsub("[^A-Za-z0-9]+", " ", as.character(group)), ".png")
+    plot_export_path <- file.path(output_dir, plot_filename)
+    ggsave(plot_export_path, plot = corr_plot, width = 8, height = 7, dpi = 300)
+    cat("   > Plot saved to:", plot_export_path, "\n")
+
+
+    # f. Tidy the correlation and n matrices and join them
+    cor_tidy <- as.data.frame(cor_matrix) %>%
+      rownames_to_column("bio_x") %>%
+      pivot_longer(cols = -bio_x, names_to = "bio_y", values_to = "correlation")
+
+    n_tidy <- as.data.frame(n_matrix) %>%
+      rownames_to_column("bio_x") %>%
+      pivot_longer(cols = -bio_x, names_to = "bio_y", values_to = "n")
+
+    # Join results and store in the list
+    correlation_list[[as.character(group)]] <- inner_join(cor_tidy, n_tidy, by = c("bio_x", "bio_y")) %>%
+      filter(bio_x < bio_y) %>% 
+      mutate(age_group = group)
+    
+  } else {
+    cat("\n--- Not enough data for correlation matrix in Age Group:", as.character(group), "---\n")
+  }
+}
+
+# 5. Combine the list of results into a single data frame AFTER the loop
+all_correlations <- bind_rows(correlation_list)
+
+# 6. Print the final, compiled list of all correlations
+cat("\n\n--- Compiled List of All Correlation Values ---\n")
+print(all_correlations)
+
+
+# --- Fisher Z-Test for Comparing Correlation Coefficients ---
+compare_correlations_z_test <- function(r1, n1, r2, n2) {
+  z1 <- 0.5 * log((1 + r1) / (1 - r1))
+  z2 <- 0.5 * log((1 + r2) / (1 - r2))
+  se_diff <- sqrt(1 / (n1 - 3) + 1 / (n2 - 3))
+  z_stat <- (z1 - z2) / se_diff
+  p_value <- 2 * (1 - pnorm(abs(z_stat)))
+  return(list(z_statistic = z_stat, p_value = p_value))
+}
+
+# --- Perform Significance Testing Between All Age Group Pairs ---
+if (length(age_groups) > 1) {
+
+  age_group_pairs <- combn(as.character(age_groups), 2, simplify = FALSE)
+  comparison_results_list <- list()
+  
+  for (pair in age_group_pairs) {
+    group1_label <- pair[1]
+    group2_label <- pair[2]
+    
+    group1_data <- all_correlations %>% filter(age_group == group1_label)
+    group2_data <- all_correlations %>% filter(age_group == group2_label)
+    
+    comparison_df <- inner_join(group1_data, group2_data, by = c("bio_x", "bio_y"), suffix = c("_g1", "_g2"))
+    
+    if (nrow(comparison_df) > 0) {
+      test_results <- comparison_df %>%
+        rowwise() %>%
+        mutate(test_result = list(compare_correlations_z_test(correlation_g1, n_g1, correlation_g2, n_g2))) %>%
+        ungroup() %>%
+        mutate(z_statistic = sapply(test_result, `[[`, "z_statistic"),
+               p_value = sapply(test_result, `[[`, "p_value")) %>%
+        select(-test_result)
+        
+      comparison_results_list[[paste(group1_label, "vs", group2_label)]] <- test_results
+    }
+  }
+
+  final_comparison_results <- bind_rows(comparison_results_list) %>%
+    mutate(significant = ifelse(p_value < 0.05, "Yes", "No")) %>%
+    select(bio_x, bio_y, 
+           age_group_g1, correlation_g1, n_g1,
+           age_group_g2, correlation_g2, n_g2,
+           z_statistic, p_value, significant)
+
+  cat("\n\n--- Comparison of Correlations Between Age Groups (Fisher Z-Test) ---\n")
+  print(final_comparison_results)
+  
+  significant_findings <- final_comparison_results %>% filter(significant == "Yes")
+  if(nrow(significant_findings) > 0) {
+    cat("\n\n--- Summary of Significant Differences ---\n")
+    print(significant_findings)
+  } else {
+    cat("\n\n--- No significant differences in correlations were found between any age groups. ---\n")
+  }
+
+} else {
+  cat("\n\n--- Not enough age groups to perform a comparison. ---\n")
+  final_comparison_results <- data.frame() 
+}
+
+# --- NEW: Visualize Correlation Differences Across Age Groups ---
+if (nrow(all_correlations) > 0) {
+  cat("\n\n--- Visualizing Differences in Correlations by Age Group ---\n")
+  
+  # Create a combined label for faceting
+  all_correlations <- all_correlations %>%
+    mutate(biometric_pair = paste(bio_x, "-", bio_y))
+    
+  # Create the faceted bar plot
+  comparison_plot <- ggplot(all_correlations, aes(x = age_group, y = correlation, fill = age_group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    facet_wrap(~biometric_pair) +
+    labs(
+      title = "Comparison of Biometric Correlations Across Age Groups",
+      x = "Age Group",
+      y = "Correlation Coefficient"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          strip.text = element_text(size = 8)) # Adjust text size for readability
+          
+  print(comparison_plot)
+  
+  # Export the comparison plot
+  comparison_plot_path <- file.path(output_dir, "Correlation Comparison by Age Group.png")
+  ggsave(comparison_plot_path, plot = comparison_plot, width = 12, height = 10, dpi = 300)
+  cat("   > Comparison plot saved to:", comparison_plot_path, "\n")
+}
+
+
+# --- Export the Final Data to Excel ---
+final_export_list <- c(
+  list("Significance_Tests" = final_comparison_results), 
+  matrices_to_export
+)
+
+excel_export_path <- file.path(output_dir, "Correlation Comparisons Age Groups.xlsx")
+write.xlsx(final_export_list, excel_export_path, rowNames = FALSE, firstRow = TRUE, overwrite = TRUE)
+cat("\nAnalysis complete. Data including significance tests and raw correlation matrices exported to:", excel_export_path, "\n")
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+#**================================================================**
+#** Analysis of Combined Phase Shifts and Deviations               **
+#**================================================================**
+```{r}
+# --- Analysis of Phase Shifts (p_phase and t_phase) ---
+
+# 1. Define helper functions for calculating cyclical differences and variance.
+
+# Calculates the shortest difference between two points on a 24-hour cycle.
+calculate_phase_difference <- function(phase1, phase2, cycle_length = 24) {
+  diff <- abs(phase1 - phase2)
+  pmin(diff, cycle_length - diff)
+}
+
+# Calculates circular variance for cyclical data.
+circular_variance <- function(x, cycle_length = 24) {
+  if (length(na.omit(x)) < 2) return(NA)
+  x_rad <- (x / cycle_length) * 2 * pi
+  # Calculate mean resultant vector length (R)
+  R <- sqrt(sum(cos(x_rad))^2 + sum(sin(x_rad))^2) / length(x)
+  1 - R # Return variance
+}
+
+
+# 2. Optimized Pipeline: Prepare data and calculate phase differences in one step.
+# The resulting dataframe contains the per-patient, per-biometric phase shifts.
+phase_differences <- SJL %>%
+  # Filter out 'Both' week type and any rows with NA in 'week'
+  filter(!is.na(week), week != "Both") %>%
+  # Handle multiple readings by averaging the phase for each patient, week, and bio
+  group_by(patient, week, bio) %>%
+  summarise(
+    p_phase = mean(p_phase, na.rm = TRUE),
+    t_phase = mean(t_phase, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  # Pivot to a wide format to get Weekday and Weekend side-by-side
+  pivot_wider(names_from = week, values_from = c(p_phase, t_phase)) %>%
+  # This filter removes patients who do not have the core phase data for BOTH
+  # Weekday and Weekend, which is the minimum requirement for this analysis.
+  filter(!is.na(p_phase_Weekday) & !is.na(p_phase_Weekend) &
+         !is.na(t_phase_Weekday) & !is.na(t_phase_Weekend)) %>%
+  # Calculate cyclical differences and the total deviation magnitude
+  mutate(
+    p_phase_diff = calculate_phase_difference(p_phase_Weekday, p_phase_Weekend),
+    t_phase_diff = calculate_phase_difference(t_phase_Weekday, t_phase_Weekend),
+    magnitude_deviation = p_phase_diff + t_phase_diff
+  )
+
+# 3. Create the SJLBIO dataframe with per-patient, per-biometric shifts.
+SJLBIO <- phase_differences %>%
+  # Select the key columns for the final output
+  select(patient, bio, p_phase_diff, t_phase_diff, magnitude_deviation)
+
+cat("\n--- Per-Patient, Per-Biometric Phase Shift Summary (SJLBIO) ---\n")
+print(SJLBIO)
+
+
+# 4. Create the SJLDeviations dataframe with patient-level summary statistics (Phase Metrics).
+SJLDeviations <- phase_differences %>%
+  group_by(patient) %>%
+  summarise(
+    avg_total_deviation = mean(magnitude_deviation, na.rm = TRUE),
+    sd_total_deviation = sd(magnitude_deviation, na.rm = TRUE),
+    # Calculate circular variance and SD for the deviation magnitude
+    circular_variance_deviation = circular_variance(magnitude_deviation),
+    # Note: circular_sd requires variance to be < 1, will return NaN otherwise
+    circular_sd_deviation = sqrt(-2 * log(1 - circular_variance_deviation)),
+    mad_total_deviation = mad(magnitude_deviation, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+cat("\n--- Patient-Level Deviation Summary (SJLDeviations) ---\n")
+print(SJLDeviations)
+
+# Both 'SJLBIO' and 'SJLDeviations' are now available in your environment.
+
+
+# --- Correlation of Phase Deviation and Amplitude Deviation (OVERALL & BY BIOMETRIC) ---
+
+# Create the directory for image exports if it doesn't exist
+images_output_dir <- file.path(valid_path, "Stats/Images/PhaseDev")
+if (!dir.exists(images_output_dir)) {
+  dir.create(images_output_dir, recursive = TRUE)
+  cat("Created directory for image exports:", images_output_dir, "\n")
+}
+
+# Initialize an empty list to store the results from all analyses
+results_list <- list()
+
+# --- Analysis 0: OVERALL Correlation ---
+# 5. Calculate Overall Amplitude Deviation (Ampltide Metrics).
+cat("\n\n--- Correlation for OVERALL: Phase Deviation vs. Overall Amplitude Deviation ---\n")
+
+amplitude_diffs_overall <- SJL %>%
+  filter(!is.na(week), week != "Both") %>%
+  # Group by patient, week, AND bio to get mean amplitude for each
+  group_by(patient, week, bio) %>%
+  summarise(mean_amplitude = mean(amplitude, na.rm = TRUE), .groups = 'drop') %>%
+  # Pivot to a wide format for comparison
+  pivot_wider(names_from = week, values_from = mean_amplitude) %>%
+  filter(!is.na(Weekday) & !is.na(Weekend)) %>%
+  # Calculate the percentage difference for each biometric
+  mutate(percent_diff = abs((Weekend - Weekday) / Weekday) * 100) %>%
+  # NOW, group by patient to get a single average percentage difference across their biometrics
+  group_by(patient) %>%
+  summarise(overall_amplitude_percent_diff = mean(percent_diff, na.rm = TRUE), .groups = 'drop')
+
+
+# 6. Combine all overall metrics into a single dataframe, SJL2.
+# This dataframe contains all per-patient overall phase and amplitude deviation metrics.
+SJL2 <- inner_join(SJLDeviations, amplitude_diffs_overall, by = "patient")
+
+cat("\n--- Combined Patient-Level Deviation Data (SJL2) ---\n")
+print(SJL2)
+
+
+# Perform and store the overall correlations
+if (nrow(SJL2) > 2) {
+  # a. Average Deviation vs. Overall Amplitude
+  correlation_test_avg_overall <- cor.test(
+    SJL2$avg_total_deviation,
+    SJL2$overall_amplitude_percent_diff,
+    method = "spearman"
+  )
+  
+  # --- Generate and export Quick Plot for Average Deviation ---
+  plot_avg_overall <- ggplot(SJL2, aes(x = avg_total_deviation, y = overall_amplitude_percent_diff)) +
+    geom_point(alpha = 0.7) + 
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    labs(title = "Overall Phase vs. Amplitude Deviation", 
+         subtitle = "Average Phase Deviation", 
+         x = "Average Phase Deviation (Hours)", 
+         y = "Overall Amplitude Difference (%)") + 
+    theme_minimal()
+  print(plot_avg_overall)
+  
+  # Export the plot
+  ggsave(
+    file.path(images_output_dir, "Overall_Avg_Phase_vs_Amplitude_Deviation.png"),
+    plot = plot_avg_overall, width = 8, height = 6, dpi = 300, bg = "white"
+  )
+  
+  n_avg_overall <- nrow(SJL2)
+  rho_avg_overall <- correlation_test_avg_overall$estimate
+  power_avg_overall <- pwr.r.test(n = n_avg_overall, r = rho_avg_overall, sig.level = 0.05, alternative = "two.sided")$power
+  results_list[[length(results_list) + 1]] <- data.frame(Biometric = "Overall", Analysis_Type = "Phase", p_value = correlation_test_avg_overall$p.value, sample_estimate_rho = rho_avg_overall, power = power_avg_overall)
+  
+  # b. MAD Deviation vs. Overall Amplitude
+  correlation_test_mad_overall <- cor.test(
+    SJL2$mad_total_deviation,
+    SJL2$overall_amplitude_percent_diff,
+    method = "spearman"
+  )
+  
+  # --- Generate and export Quick Plot for MAD Deviation ---
+  plot_mad_overall <- ggplot(SJL2, aes(x = mad_total_deviation, y = overall_amplitude_percent_diff)) +
+    geom_point(alpha = 0.7) + 
+    geom_smooth(method = "lm", se = FALSE, color = "red") +
+    labs(title = "Overall Phase vs. Amplitude Deviation", 
+         subtitle = "MAD of Phase Deviation", 
+         x = "MAD of Phase Deviation (Hours)", 
+         y = "Overall Amplitude Difference (%)") + 
+    theme_minimal()
+  print(plot_mad_overall)
+
+  # Export the plot
+  ggsave(
+    file.path(images_output_dir, "Overall_MAD_Phase_vs_Amplitude_Deviation.png"),
+    plot = plot_mad_overall, width = 8, height = 6, dpi = 300, bg = "white"
+  )
+
+  n_mad_overall <- nrow(SJL2)
+  rho_mad_overall <- correlation_test_mad_overall$estimate
+  power_mad_overall <- pwr.r.test(n = n_mad_overall, r = rho_mad_overall, sig.level = 0.05, alternative = "two.sided")$power
+  results_list[[length(results_list) + 1]] <- data.frame(Biometric = "Overall", Analysis_Type = "MAD", p_value = correlation_test_mad_overall$p.value, sample_estimate_rho = rho_mad_overall, power = power_mad_overall)
+
+} else {
+  cat("Not enough combined data to perform overall correlation analysis.\n")
+}
+
+
+# --- Analysis 1-N: Per-Biometric Correlations ---
+# This section calculates the amplitude difference for each biometric and then
+# correlates it with the patient's overall phase deviation metrics (SJLDeviations).
+
+amplitude_diffs_by_bio <- SJL %>%
+  filter(!is.na(week), week != "Both") %>%
+  group_by(patient, week, bio) %>%
+  summarise(mean_amplitude = mean(amplitude, na.rm = TRUE), .groups = 'drop') %>%
+  pivot_wider(names_from = week, values_from = mean_amplitude) %>%
+  filter(!is.na(Weekday) & !is.na(Weekend)) %>%
+  mutate(amplitude_percent_diff = abs((Weekend - Weekday) / Weekday) * 100) %>%
+  select(patient, bio, amplitude_percent_diff)
+
+combined_deviation_data_by_bio <- inner_join(SJLDeviations, amplitude_diffs_by_bio, by = "patient")
+biometrics_to_analyze <- unique(combined_deviation_data_by_bio$bio)
+
+for (current_bio in biometrics_to_analyze) {
+  
+  bio_data <- combined_deviation_data_by_bio %>% filter(bio == current_bio)
+  
+  # a. Average Phase Deviation vs. Amplitude Deviation
+  cat(paste("\n--- Correlation for", current_bio, ": Average Phase Deviation vs. Amplitude Deviation ---\n"))
+  
+  if (nrow(bio_data) > 2) {
+    correlation_test_avg <- cor.test(bio_data$avg_total_deviation, bio_data$amplitude_percent_diff, method = "spearman")
+    print(correlation_test_avg)
+    
+    plot_avg <- ggplot(bio_data, aes(x = avg_total_deviation, y = amplitude_percent_diff)) +
+      geom_point(alpha = 0.7) + geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      labs(title = paste("Phase vs. Amplitude Deviation for", current_bio), subtitle = "Average Phase Deviation", x = "Average Phase Deviation (Hours)", y = "Amplitude Difference (%)") + theme_minimal()
+    print(plot_avg)
+    
+    # Export the plot
+    ggsave(
+      file.path(images_output_dir, paste0(current_bio, "_Avg_Phase_vs_Amplitude_Deviation.png")),
+      plot = plot_avg, width = 8, height = 6, dpi = 300, bg = "white"
+    )
+    
+    n_avg <- nrow(bio_data)
+    rho_avg <- correlation_test_avg$estimate
+    power_avg <- pwr.r.test(n = n_avg, r = rho_avg, sig.level = 0.05, alternative = "two.sided")$power
+    results_list[[length(results_list) + 1]] <- data.frame(Biometric = current_bio, Analysis_Type = "Phase", p_value = correlation_test_avg$p.value, sample_estimate_rho = rho_avg, power = power_avg)
+    
+  } else {
+    cat(paste("Not enough data for", current_bio, "to perform correlation for average deviation.\n"))
+  }
+  
+  # b. MAD of Phase Deviation vs. Amplitude Deviation
+  cat(paste("\n--- Correlation for", current_bio, ": MAD of Phase Deviation vs. Amplitude Deviation ---\n"))
+  
+  if (nrow(bio_data) > 2) {
+    correlation_test_mad <- cor.test(bio_data$mad_total_deviation, bio_data$amplitude_percent_diff, method = "spearman")
+    print(correlation_test_mad)
+    
+    plot_mad <- ggplot(bio_data, aes(x = mad_total_deviation, y = amplitude_percent_diff)) +
+      geom_point(alpha = 0.7) + geom_smooth(method = "lm", se = FALSE, color = "red") +
+      labs(title = paste("Phase vs. Amplitude Deviation for", current_bio), subtitle = "MAD of Phase Deviation", x = "MAD of Phase Deviation (Hours)", y = "Amplitude Difference (%)") + theme_minimal()
+    print(plot_mad)
+    
+    # Export the plot
+    ggsave(
+      file.path(images_output_dir, paste0(current_bio, "_MAD_Phase_vs_Amplitude_Deviation.png")),
+      plot = plot_mad, width = 8, height = 6, dpi = 300, bg = "white"
+    )
+    
+    n_mad <- nrow(bio_data)
+    rho_mad <- correlation_test_mad$estimate
+    power_mad <- pwr.r.test(n = n_mad, r = rho_mad, sig.level = 0.05, alternative = "two.sided")$power
+    results_list[[length(results_list) + 1]] <- data.frame(Biometric = current_bio, Analysis_Type = "MAD", p_value = correlation_test_mad$p.value, sample_estimate_rho = rho_mad, power = power_mad)
+    
+  } else {
+    cat(paste("Not enough data for", current_bio, "to perform correlation for MAD deviation.\n"))
+  }
+}
+
+
+# --- Compile and Export Statistical Analysis Results ---
+
+# Create the DeviationsS dataframe from the list of results after all analyses.
+if (length(results_list) > 0) {
+  DeviationsS <- bind_rows(results_list)
+  
+  cat("\n\n--- Summary of Statistical Analyses (DeviationsS) ---\n")
+  print(DeviationsS)
+  
+  export_path <- file.path(valid_path, "Stats", "Simple Deviations Overall and by Biometric.xlsx")
+  write.xlsx(DeviationsS, export_path, rowNames = FALSE, firstRow = TRUE, overwrite = TRUE)
+  cat("Analysis complete. Data exported to:", export_path, "\n")
+  
+  
+export_path_bio <- file.path(valid_path, "Stats/SJLBIO.xlsx")
+write.xlsx(SJLBIO, export_path_bio, rowNames = FALSE, firstRow = TRUE, overwrite = TRUE)
+  
+# Export the combined overall deviation data (SJL2) for external use, e.g., publication plots
+export_path_sjl2 <- file.path(valid_path, "Stats/SJL2_Overall_Deviations.xlsx")
+write.xlsx(SJL2, export_path_sjl2, rowNames = FALSE, firstRow = TRUE, overwrite = TRUE)
+cat("Combined overall deviation data exported to:", export_path_sjl2, "\n")
+  
+} else {
+  cat("\n\n--- Could not generate statistical summary as no correlation tests were successful. ---\n")
+  DeviationsS <- data.frame() # Create an empty dataframe if no results
+}
+
+
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+#**================================================================**
+#** 8. Overall Deviation Publication Plots                       **
+#**================================================================**
+```{r}
+# This section generates high-quality scatter plots for the overall phase 
+# vs. amplitude deviation correlations, relying on the 'SJL2' dataframe 
+# created and persisted by the main analysis script (analysis.R).
+
+# NOTE: SJL2 contains the columns 'avg_total_deviation', 'mad_total_deviation', 
+# and 'overall_amplitude_percent_diff'.
+
+# Filter SJL2 to ensure no NA values are used for plotting
+plot_data_pub <- SJL2 %>%
+  filter(!is.na(avg_total_deviation) & !is.na(overall_amplitude_percent_diff) &
+         !is.na(mad_total_deviation))
+
+if (nrow(plot_data_pub) == 0) {
+  cat("ERROR: SJL2 is empty or contains no complete rows for deviation plotting.\n")
+  # Exit script execution gracefully if no data is available
+  # In R, this might be handled by conditional checks, or simply printing the error.
+} else {
+
+  # Create the directory for publication-quality exports
+  output_dir <- file.path(valid_path, "Stats/PubPics")
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+    cat("Created directory for publication exports:", output_dir, "\n")
+  }
+
+  # --- Plot 1: Average Phase Deviation vs. Overall Amplitude Deviation ---
+
+  avg_dev_plot_pub <- ggplot(plot_data_pub, aes(x = avg_total_deviation, y = overall_amplitude_percent_diff)) +
+    
+    # Add scatter plot points (blue)
+    geom_point(alpha = 0.7, color = "#1f77b4") + # A professional blue
+    
+    # Add GLM (linear fit) line
+    geom_smooth(
+      method = "lm",
+      formula = y ~ x,
+      color = "#d62728", # Red
+      linetype = "solid",
+      linewidth = 1.0,
+      se = TRUE
+    ) +
+    
+    # Apply Axis Limits (limit y axis to 150%)
+    ylim(0, 150) +
+    
+    # Apply Labels (More descriptive titles for publication)
+    labs(
+      title = "Phase Deviation vs. Amplitude Deviation",
+      
+      x = "Absolute Phase Deviation (h)",
+      y = "Overall Amplitude Difference (%)"
+    ) +
+    
+    # Apply Clean Theme (using the user's preferred style)
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "black"),
+      panel.grid.major = element_line(color = "black"), # Lighter gray grid lines
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.background = element_rect(fill = "white", colour = NA), 
+      plot.background = element_rect(fill = "white", colour = NA),
+      axis.line = element_line(colour = "black") # Adding axis lines
+    )
+
+  # Display and Save Plot 1
+  print(avg_dev_plot_pub)
+
+  file_name_avg <- "Overall_Avg_Phase_vs_Amplitude_Deviation_Pub.png"
+  output_path_avg <- file.path(output_dir, file_name_avg)
+  ggsave(filename = output_path_avg, plot = avg_dev_plot_pub, width = 7.5, height = 5.6, units = "in", dpi = 300)
+  cat(paste0("\nSaved Publication Plot (Avg Dev) to: ", output_path_avg, "\n"))
+
+
+  # --- Plot 2: MAD Phase Deviation vs. Overall Amplitude Deviation ---
+
+  mad_dev_plot_pub <- ggplot(plot_data_pub, aes(x = mad_total_deviation, y = overall_amplitude_percent_diff)) +
+    
+    # Add scatter plot points (darker blue)
+    geom_point(alpha = 0.7, color = "#1f77b4") +
+    
+    # Add GLM (linear fit) line
+    geom_smooth(
+      method = "lm",
+      formula = y ~ x,
+      color = "#d62728", # Red
+      linetype = "solid",
+      linewidth = 1.0,
+      se = TRUE
+    ) +
+    
+    # Apply Axis Limits (limit y axis to 150%)
+    ylim(0, 150) +
+    
+    # Apply Labels (More descriptive titles for publication)
+    labs(
+      title = "Mean Average Deviations of Phase Deviation vs. Amplitude Deviation",
+      
+      x = "Mean Phase Variability (h)",
+      y = "Overall Amplitude Difference (%)"
+    ) +
+    
+    # Apply Clean Theme (using the user's preferred style)
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "black"),
+      panel.grid.major = element_line(color = "black"), # Lighter gray grid lines
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.background = element_rect(fill = "white", colour = NA), 
+      plot.background = element_rect(fill = "white", colour = NA),
+      axis.line = element_line(colour = "black") # Adding axis lines
+    )
+
+  # Display and Save Plot 2
+  print(mad_dev_plot_pub)
+
+  file_name_mad <- "Overall_MAD_Phase_vs_Amplitude_Deviation_Pub.png"
+  output_path_mad <- file.path(output_dir, file_name_mad)
+  ggsave(filename = output_path_mad, plot = mad_dev_plot_pub, width = 7.5, height = 5.6, units = "in", dpi = 300)
+  cat(paste0("\nSaved Publication Plot (MAD Dev) to: ", output_path_mad, "\n"))
+  
+} # End of check for plot_data_pub rows
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+```{r}
+
+
+lm_age_result <- lm(overall_amplitude_percent_diff ~ avg_total_deviation,
+                    data = SJL2)
+
+print(lm_age_result)
+
+lm_age_result2 <- lm(overall_amplitude_percent_diff ~ mad_total_deviation,
+                    data = SJL2)
+
+print(lm_age_result2)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#**================================================================**
+#** Analysis of social jetlag                                      **
+#**================================================================**
+```{r}
+#==============================================================================
+# Data Preparation
+#==============================================================================
+cat("--- Preparing data for Social Jetlag analysis ---\n")
+
+# Create a separate dataframe for this analysis, filtering for only Weekday and Weekend
+# Add age group stratification
+SJLA <- SJL %>%
+  filter(week %in% c("Weekday", "Weekend")) %>%
+  mutate(age_group = cut(age,
+                         breaks = c(19, 40, 70, Inf),
+                         labels = c("20-40", "41-70", "71+"),
+                         include.lowest = TRUE))
+
+# Helper Function: Calculate Circular Difference (Absolute)
+calculate_phase_difference <- function(phase1, phase2, cycle_length = 24) {
+  diff <- abs(phase1 - phase2)
+  pmin(diff, cycle_length - diff)
+}
+
+
+#==============================================================================
+# Step 1 & 2: Calculate and Stratify Social Jetlag
+#==============================================================================
+cat("--- Step 1 & 2: Calculating and stratifying Social Jetlag ---\n")
+
+sjl_summary <- SJLA %>%
+  group_by(patient, week) %>%
+  summarise(mean_mp = mean(p_phase, na.rm = TRUE), .groups = 'drop') %>%
+  pivot_wider(names_from = week, values_from = mean_mp) %>%
+  filter(!is.na(Weekday) & !is.na(Weekend)) %>%
+  mutate(PhaseDev = calculate_phase_difference(Weekday, Weekend)) %>%
+  mutate(sjl_severity = cut(PhaseDev,
+                            breaks = c(-Inf, 1, 2, Inf),
+                            labels = c("Mild (0-1h)", "Moderate (1-2h)", "Severe (2+h)"),
+                            right = TRUE)) %>%
+  select(patient, PhaseDev, sjl_severity)
+
+# Add age group information to the main summary table
+patient_info <- SJLA %>% distinct(patient, age_group)
+sjl_summary <- inner_join(sjl_summary, patient_info, by = "patient")
+
+cat("Social Jetlag summary created for", nrow(sjl_summary), "patients.\n")
+
+
+#==============================================================================
+# Step 3: Evaluate Weekday vs. Weekend Rhythm Changes
+#==============================================================================
+cat("\n--- Step 3: Calculating rhythm changes from Weekday to Weekend ---\n")
+
+rhythm_changes_by_bio <- SJLA %>%
+  group_by(patient, week, bio) %>%
+  summarise(across(c(amplitude, mesor), ~mean(.x, na.rm = TRUE)), .groups = 'drop') %>%
+  pivot_wider(names_from = week, values_from = c(amplitude, mesor)) %>%
+  filter(if_all(starts_with(c("amplitude_", "mesor_")), ~!is.na(.))) %>%
+  mutate(
+    amplitude_directed_change = ((amplitude_Weekend - amplitude_Weekday) / amplitude_Weekday) * 100,
+    amplitude_magnitude_change = abs(amplitude_directed_change)
+  )
+
+overall_amplitude_changes <- rhythm_changes_by_bio %>%
+  group_by(patient) %>%
+  summarise(
+    overall_amplitude_directed_change = mean(amplitude_directed_change, na.rm = TRUE),
+    overall_amplitude_magnitude_change = mean(amplitude_magnitude_change, na.rm = TRUE)
+  )
+
+#==============================================================================
+# Main Analysis Loop
+#==============================================================================
+cat("\n--- Generating Analyses, Visualizations, and Statistical Summaries ---\n")
+
+# Create the directory for image exports if it doesn't exist
+# Note: Assumes a 'valid_path' variable is defined. If not, will save to the working directory.
+if(!exists("valid_path")) valid_path <- getwd()
+images_output_dir <- file.path(valid_path, "Stats", "Images", "Jetlag")
+if (!dir.exists(images_output_dir)) {
+  dir.create(images_output_dir, recursive = TRUE)
+  cat("Created directory for image exports:", images_output_dir, "\n")
+}
+
+
+# Initialize an empty list to store the results dataframe from each group
+results_list <- list()
+
+# Define the groups to loop through: "Overall" and each age group
+analysis_groups <- c("Overall", levels(SJLA$age_group))
+
+for(group in analysis_groups) {
+  
+  cat(paste("\n\n======================================================================"))
+  cat(paste("\n--- Running Analysis for Group:", group, "---"))
+  cat(paste("\n======================================================================\n"))
+  
+  # Filter data for the current group
+  if (group == "Overall") {
+    current_sjl_summary <- sjl_summary
+  } else {
+    current_sjl_summary <- sjl_summary %>% filter(age_group == group)
+  }
+  
+  # Check if there is enough data to proceed
+  if(nrow(current_sjl_summary) < 3) {
+    cat("Not enough data to run analysis for this group.\n")
+    next # Skip to the next group
+  }
+  
+  # Join data for the current group
+  analysis_data <- inner_join(current_sjl_summary, overall_amplitude_changes, by = "patient")
+  analysis_data_by_bio <- inner_join(current_sjl_summary, rhythm_changes_by_bio, by = "patient")
+
+  # --- Overall Amplitude Change Analysis ---
+  # A. Continuous Analysis (Correlation)
+  correlation_overall <- cor.test(analysis_data$PhaseDev, analysis_data$overall_amplitude_magnitude_change, method = "spearman")
+  power_corr_overall <- pwr.r.test(n = nrow(analysis_data), r = correlation_overall$estimate, sig.level = 0.05)$power
+  results_list[[length(results_list) + 1]] <- data.frame(age_group = group, biometric = "Overall", test_type = "Correlation", p_value = correlation_overall$p.value, estimate = correlation_overall$estimate, power = power_corr_overall)
+
+  plot_corr_overall <- ggplot(analysis_data, aes(x = PhaseDev, y = overall_amplitude_magnitude_change)) + geom_point(alpha = 0.6) + geom_smooth(method = "lm", se = FALSE, color = "blue") + labs(title = "Social Jetlag vs. Overall Amplitude Change", x = "SJL Magnitude (Hours)", y = "Overall Amplitude Change Mag. (%)") + theme_minimal()
+
+  # B. Stratified Analysis (ANOVA)
+  anova_overall <- aov(overall_amplitude_magnitude_change ~ sjl_severity, data = analysis_data)
+  anova_summary <- summary(anova_overall)
+  # Calculate effect size (f2) for power analysis
+  ss_between <- anova_summary[[1]]["sjl_severity", "Sum Sq"]
+  ss_within <- anova_summary[[1]]["Residuals", "Sum Sq"]
+  f2 <- ss_between / ss_within
+  power_anova_overall <- pwr.f2.test(u = anova_summary[[1]]["sjl_severity", "Df"], v = anova_summary[[1]]["Residuals", "Df"], f2 = f2, sig.level = 0.05)$power
+  results_list[[length(results_list) + 1]] <- data.frame(age_group = group, biometric = "Overall", test_type = "ANOVA", p_value = anova_summary[[1]][1, "Pr(>F)"], estimate = anova_summary[[1]][1, "F value"], power = power_anova_overall)
+
+  plot_stratified_overall <- ggplot(analysis_data, aes(x = sjl_severity, y = overall_amplitude_magnitude_change, fill = sjl_severity)) + geom_boxplot(alpha = 0.7) + labs(title = "Overall Amplitude Change by SJL Severity", x = "SJL Group", y = "Overall Amplitude Change Mag. (%)") + theme_minimal() + theme(legend.position = "none")
+
+  # C. Combined Plot for Overall Analysis
+  combined_overall_plot <- ggarrange(plot_corr_overall, plot_stratified_overall, ncol = 2, nrow = 1)
+  overall_plot_annotated <- annotate_figure(combined_overall_plot, top = text_grob(paste("Overall Analysis for Group:", group), face = "bold", size = 16))
+  print(overall_plot_annotated)
+  
+  # Export the combined overall plot
+  plot_filename_overall <- paste0("Overall_Analysis_", gsub("[^A-Za-z0-9]+", "_", group), ".png")
+  ggsave(
+    file.path(images_output_dir, plot_filename_overall),
+    plot = overall_plot_annotated,
+    width = 12, height = 6, dpi = 300, bg = "white"
+  )
+  cat(" > Overall plot saved for group:", group, "\n")
+
+
+  # --- Per-Biometric Analysis ---
+  biometrics_to_analyze <- unique(analysis_data_by_bio$bio)
+  for(current_bio in biometrics_to_analyze) {
+    
+    cat(paste("\n--- Analyzing Biometric:", current_bio, "for Group:", group, "---\n"))
+    
+    bio_data <- analysis_data_by_bio %>% filter(bio == current_bio)
+    if(nrow(bio_data) < 3) {
+      cat("Not enough data for analysis.\n")
+      next
+    }
+    
+    # --- Visualization for Per-Biometric ---
+    # A. Continuous Plot
+    plot_corr_bio <- ggplot(bio_data, aes(x = PhaseDev, y = amplitude_magnitude_change)) +
+      geom_point(alpha = 0.6) +
+      geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      labs(x = "SJL Magnitude (Hours)", y = "Amplitude Change Mag. (%)") +
+      theme_minimal()
+      
+    # B. Stratified Plot
+    plot_stratified_bio <- ggplot(bio_data, aes(x = sjl_severity, y = amplitude_magnitude_change, fill = sjl_severity)) +
+      geom_boxplot(alpha = 0.7) +
+      labs(x = "SJL Group", y = "Amplitude Change Mag. (%)") +
+      theme_minimal() +
+      theme(legend.position = "none")
+      
+    # C. Combined Plot for the current biometric
+    combined_bio_plot <- ggarrange(plot_corr_bio, plot_stratified_bio, ncol = 2, nrow = 1)
+    bio_plot_annotated <- annotate_figure(combined_bio_plot, top = text_grob(paste("Analysis for", current_bio, "(Group:", group, ")"), face = "bold", size = 14))
+    print(bio_plot_annotated)
+    
+    # Export the combined biometric plot
+    plot_filename_bio <- paste0(current_bio, "_Analysis_", gsub("[^A-Za-z0-9]+", "_", group), ".png")
+    ggsave(
+      file.path(images_output_dir, plot_filename_bio),
+      plot = bio_plot_annotated,
+      width = 12, height = 6, dpi = 300, bg = "white"
+    )
+    cat("   > Plot saved for biometric:", current_bio, "\n")
+    
+    # --- Statistical Tests for Per-Biometric ---
+    # A. Continuous Analysis (Correlation)
+    correlation_bio <- cor.test(bio_data$PhaseDev, bio_data$amplitude_magnitude_change, method = "spearman")
+    power_corr_bio <- pwr.r.test(n = nrow(bio_data), r = correlation_bio$estimate, sig.level = 0.05)$power
+    results_list[[length(results_list) + 1]] <- data.frame(age_group = group, biometric = current_bio, test_type = "Correlation", p_value = correlation_bio$p.value, estimate = correlation_bio$estimate, power = power_corr_bio)
+
+    # B. Stratified Analysis (ANOVA)
+    anova_bio <- aov(amplitude_magnitude_change ~ sjl_severity, data = bio_data)
+    anova_summary_bio <- summary(anova_bio)
+    ss_between_bio <- anova_summary_bio[[1]]["sjl_severity", "Sum Sq"]
+    ss_within_bio <- anova_summary_bio[[1]]["Residuals", "Sum Sq"]
+    f2_bio <- ss_between_bio / ss_within_bio
+    power_anova_bio <- pwr.f2.test(u = anova_summary_bio[[1]]["sjl_severity", "Df"], v = anova_summary_bio[[1]]["Residuals", "Df"], f2 = f2_bio, sig.level = 0.05)$power
+    results_list[[length(results_list) + 1]] <- data.frame(age_group = group, biometric = current_bio, test_type = "ANOVA", p_value = anova_summary_bio[[1]][1, "Pr(>F)"], estimate = anova_summary_bio[[1]][1, "F value"], power = power_anova_bio)
+  }
+}
+
+#==============================================================================
+# Finalize and Export Results
+#==============================================================================
+cat("\n\n--- Finalizing and Exporting Statistical Results ---\n")
+
+# Combine all results into the final Jetlag dataframe
+if (length(results_list) > 0) {
+  Jetlag <- bind_rows(results_list) %>%
+    # Round numeric columns for cleaner output
+    mutate(across(where(is.numeric), ~round(.x, 4)))
+  
+  cat("Statistical summary (Jetlag) created:\n")
+  print(Jetlag)
+  
+  # Export the dataframe to an Excel file
+  # Note: Assumes a 'valid_path' variable is defined. If not, will save to the working directory.
+  if(!exists("valid_path")) valid_path <- getwd()
+  export_path <- file.path(valid_path, "Stats", "Social_Jetlag_Statistics.xlsx")
+  write.xlsx(Jetlag, export_path, overwrite = TRUE)
+  
+  cat("\nStatistical results exported to:", export_path, "\n")
+  
+} else {
+  cat("No statistical results were generated.\n")
+  Jetlag <- data.frame() # Create empty df if no results
+}
+
+cat("\n--- Analysis Complete ---\n")
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+
+
+
+#**================================================================**
+#** Analysis of Combined Phase Shifts and Deviations w/o Activity  **
+#**================================================================**
+```{r}
+# --- Analysis of Phase Shifts (p_phase and t_phase) ---
+
+# 1. Define helper functions for calculating cyclical differences and variance.
+
+# Calculates the shortest difference between two points on a 24-hour cycle.
+calculate_phase_difference <- function(phase1, phase2, cycle_length = 24) {
+  diff <- abs(phase1 - phase2)
+  pmin(diff, cycle_length - diff)
+}
+
+# Calculates circular variance for cyclical data.
+circular_variance <- function(x, cycle_length = 24) {
+  if (length(na.omit(x)) < 2) return(NA)
+  x_rad <- (x / cycle_length) * 2 * pi
+  # Calculate mean resultant vector length (R)
+  R <- sqrt(sum(cos(x_rad))^2 + sum(sin(x_rad))^2) / length(x)
+  1 - R # Return variance
+}
+
+
+# 2. Optimized Pipeline: Prepare data and calculate phase differences in one step.
+# The resulting dataframe contains the per-patient, per-biometric phase shifts.
+phase_differences <- SJL %>%
+  # Filter out 'Both' week type, any rows with NA in 'week', and the 'Steps' biometric
+  filter(!is.na(week), week != "Both", bio != "Steps") %>%
+  # Handle multiple readings by averaging the phase for each patient, week, and bio
+  group_by(patient, week, bio) %>%
+  summarise(
+    p_phase = mean(p_phase, na.rm = TRUE),
+    t_phase = mean(t_phase, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  # Pivot to a wide format to get Weekday and Weekend side-by-side
+  pivot_wider(names_from = week, values_from = c(p_phase, t_phase)) %>%
+  # This filter removes patients who do not have the core phase data for BOTH
+  # Weekday and Weekend, which is the minimum requirement for this analysis.
+  filter(!is.na(p_phase_Weekday) & !is.na(p_phase_Weekend) &
+         !is.na(t_phase_Weekday) & !is.na(t_phase_Weekend)) %>%
+  # Calculate cyclical differences and the total deviation magnitude
+  mutate(
+    p_phase_diff = calculate_phase_difference(p_phase_Weekday, p_phase_Weekend),
+    t_phase_diff = calculate_phase_difference(t_phase_Weekday, t_phase_Weekend),
+    magnitude_deviation = p_phase_diff + t_phase_diff
+  )
+
+# 3. Create the SJLBIO dataframe with per-patient, per-biometric shifts.
+SJLBIO <- phase_differences %>%
+  # Select the key columns for the final output
+  select(patient, bio, p_phase_diff, t_phase_diff, magnitude_deviation)
+
+cat("\n--- Per-Patient, Per-Biometric Phase Shift Summary (SJLBIO) ---\n")
+print(SJLBIO)
+
+
+# 4. Create the SJLDeviations dataframe with patient-level summary statistics.
+SJLDeviations <- phase_differences %>%
+  group_by(patient) %>%
+  summarise(
+    avg_total_deviation = mean(magnitude_deviation, na.rm = TRUE),
+    sd_total_deviation = sd(magnitude_deviation, na.rm = TRUE),
+    # Calculate circular variance and SD for the deviation magnitude
+    circular_variance_deviation = circular_variance(magnitude_deviation),
+    # Note: circular_sd requires variance to be < 1, will return NaN otherwise
+    circular_sd_deviation = sqrt(-2 * log(1 - circular_variance_deviation)),
+    mad_total_deviation = mad(magnitude_deviation, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+cat("\n--- Patient-Level Deviation Summary (SJLDeviations) ---\n")
+print(SJLDeviations)
+
+# Both 'SJLBIO' and 'SJLDeviations' are now available in your environment.
+
+
+# --- Correlation of Phase Deviation and Amplitude Deviation (OVERALL & BY BIOMETRIC) ---
+
+# Initialize an empty list to store the results from all analyses
+results_list <- list()
+
+# --- Analysis 0: OVERALL Correlation ---
+# This calculates the overall amplitude deviation by first calculating the 
+# percent difference for each biometric, then averaging those percentages.
+cat("\n\n--- Correlation for OVERALL: Phase Deviation vs. Overall Amplitude Deviation ---\n")
+
+amplitude_diffs_overall <- SJL %>%
+  filter(!is.na(week), week != "Both", bio != "Steps") %>%
+  # Group by patient, week, AND bio to get mean amplitude for each
+  group_by(patient, week, bio) %>%
+  summarise(mean_amplitude = mean(amplitude, na.rm = TRUE), .groups = 'drop') %>%
+  # Pivot to a wide format for comparison
+  pivot_wider(names_from = week, values_from = mean_amplitude) %>%
+  filter(!is.na(Weekday) & !is.na(Weekend)) %>%
+  # Calculate the percentage difference for each biometric
+  mutate(percent_diff = abs((Weekend - Weekday) / Weekday) * 100) %>%
+  # NOW, group by patient to get a single average percentage difference across their biometrics
+  group_by(patient) %>%
+  summarise(overall_amplitude_percent_diff = mean(percent_diff, na.rm = TRUE), .groups = 'drop')
+
+
+# Join the overall amplitude diff with the phase deviation summary
+combined_deviation_data_overall <- inner_join(SJLDeviations, amplitude_diffs_overall, by = "patient")
+
+# Perform and store the overall correlations
+if (nrow(combined_deviation_data_overall) > 2) {
+  # a. Average Deviation vs. Overall Amplitude
+  correlation_test_avg_overall <- cor.test(
+    combined_deviation_data_overall$avg_total_deviation,
+    combined_deviation_data_overall$overall_amplitude_percent_diff,
+    method = "spearman"
+  )
+  print(correlation_test_avg_overall)
+  
+  plot_avg_overall <- ggplot(combined_deviation_data_overall, aes(x = avg_total_deviation, y = overall_amplitude_percent_diff)) +
+    geom_point(alpha = 0.7) + geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    labs(title = "Overall Phase vs. Amplitude Deviation", subtitle = "Average Phase Deviation", x = "Average Phase Deviation (Hours)", y = "Overall Amplitude Difference (%)") + theme_minimal()
+  print(plot_avg_overall)
+  
+  n_avg_overall <- nrow(combined_deviation_data_overall)
+  rho_avg_overall <- correlation_test_avg_overall$estimate
+  power_avg_overall <- pwr.r.test(n = n_avg_overall, r = rho_avg_overall, sig.level = 0.05, alternative = "two.sided")$power
+  results_list[[length(results_list) + 1]] <- data.frame(Biometric = "Overall", Analysis_Type = "Phase", p_value = correlation_test_avg_overall$p.value, sample_estimate_rho = rho_avg_overall, power = power_avg_overall)
+  
+  # b. MAD Deviation vs. Overall Amplitude
+  correlation_test_mad_overall <- cor.test(
+    combined_deviation_data_overall$mad_total_deviation,
+    combined_deviation_data_overall$overall_amplitude_percent_diff,
+    method = "spearman"
+  )
+  print(correlation_test_mad_overall)
+
+  plot_mad_overall <- ggplot(combined_deviation_data_overall, aes(x = mad_total_deviation, y = overall_amplitude_percent_diff)) +
+    geom_point(alpha = 0.7) + geom_smooth(method = "lm", se = FALSE, color = "red") +
+    labs(title = "Overall Phase vs. Amplitude Deviation", subtitle = "MAD of Phase Deviation", x = "MAD of Phase Deviation (Hours)", y = "Overall Amplitude Difference (%)") + theme_minimal()
+  print(plot_mad_overall)
+  
+  n_mad_overall <- nrow(combined_deviation_data_overall)
+  rho_mad_overall <- correlation_test_mad_overall$estimate
+  power_mad_overall <- pwr.r.test(n = n_mad_overall, r = rho_mad_overall, sig.level = 0.05, alternative = "two.sided")$power
+  results_list[[length(results_list) + 1]] <- data.frame(Biometric = "Overall", Analysis_Type = "MAD", p_value = correlation_test_mad_overall$p.value, sample_estimate_rho = rho_mad_overall, power = power_mad_overall)
+
+} else {
+  cat("Not enough combined data to perform overall correlation analysis.\n")
+}
+
+
+# --- Analysis 1-N: Per-Biometric Correlations ---
+# This section calculates the amplitude difference for each biometric and then
+# correlates it with the patient's overall phase deviation metrics.
+
+amplitude_diffs_by_bio <- SJL %>%
+  filter(!is.na(week), week != "Both", bio != "Steps") %>%
+  group_by(patient, week, bio) %>%
+  summarise(mean_amplitude = mean(amplitude, na.rm = TRUE), .groups = 'drop') %>%
+  pivot_wider(names_from = week, values_from = mean_amplitude) %>%
+  filter(!is.na(Weekday) & !is.na(Weekend)) %>%
+  mutate(amplitude_percent_diff = abs((Weekend - Weekday) / Weekday) * 100) %>%
+  select(patient, bio, amplitude_percent_diff)
+
+combined_deviation_data_by_bio <- inner_join(SJLDeviations, amplitude_diffs_by_bio, by = "patient")
+biometrics_to_analyze <- unique(combined_deviation_data_by_bio$bio)
+
+for (current_bio in biometrics_to_analyze) {
+  
+  bio_data <- combined_deviation_data_by_bio %>% filter(bio == current_bio)
+  
+  # a. Average Phase Deviation vs. Amplitude Deviation
+  cat(paste("\n--- Correlation for", current_bio, ": Average Phase Deviation vs. Amplitude Deviation ---\n"))
+  
+  if (nrow(bio_data) > 2) {
+    correlation_test_avg <- cor.test(bio_data$avg_total_deviation, bio_data$amplitude_percent_diff, method = "spearman")
+    print(correlation_test_avg)
+    
+    plot_avg <- ggplot(bio_data, aes(x = avg_total_deviation, y = amplitude_percent_diff)) +
+      geom_point(alpha = 0.7) + geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      labs(title = paste("Phase vs. Amplitude Deviation for", current_bio), subtitle = "Average Phase Deviation", x = "Average Phase Deviation (Hours)", y = "Amplitude Difference (%)") + theme_minimal()
+    print(plot_avg)
+    
+    n_avg <- nrow(bio_data)
+    rho_avg <- correlation_test_avg$estimate
+    power_avg <- pwr.r.test(n = n_avg, r = rho_avg, sig.level = 0.05, alternative = "two.sided")$power
+    results_list[[length(results_list) + 1]] <- data.frame(Biometric = current_bio, Analysis_Type = "Phase", p_value = correlation_test_avg$p.value, sample_estimate_rho = rho_avg, power = power_avg)
+    
+  } else {
+    cat(paste("Not enough data for", current_bio, "to perform correlation for average deviation.\n"))
+  }
+  
+  # b. MAD of Phase Deviation vs. Amplitude Deviation
+  cat(paste("\n--- Correlation for", current_bio, ": MAD of Phase Deviation vs. Amplitude Deviation ---\n"))
+  
+  if (nrow(bio_data) > 2) {
+    correlation_test_mad <- cor.test(bio_data$mad_total_deviation, bio_data$amplitude_percent_diff, method = "spearman")
+    print(correlation_test_mad)
+    
+    plot_mad <- ggplot(bio_data, aes(x = mad_total_deviation, y = amplitude_percent_diff)) +
+      geom_point(alpha = 0.7) + geom_smooth(method = "lm", se = FALSE, color = "red") +
+      labs(title = paste("Phase vs. Amplitude Deviation for", current_bio), subtitle = "MAD of Phase Deviation", x = "MAD of Phase Deviation (Hours)", y = "Amplitude Difference (%)") + theme_minimal()
+    print(plot_mad)
+    
+    n_mad <- nrow(bio_data)
+    rho_mad <- correlation_test_mad$estimate
+    power_mad <- pwr.r.test(n = n_mad, r = rho_mad, sig.level = 0.05, alternative = "two.sided")$power
+    results_list[[length(results_list) + 1]] <- data.frame(Biometric = current_bio, Analysis_Type = "MAD", p_value = correlation_test_mad$p.value, sample_estimate_rho = rho_mad, power = power_mad)
+    
+  } else {
+    cat(paste("Not enough data for", current_bio, "to perform correlation for MAD deviation.\n"))
+  }
+}
+
+
+# --- Compile and Export Statistical Analysis Results ---
+
+# Create the DeviationsS dataframe from the list of results after all analyses.
+if (length(results_list) > 0) {
+  DeviationsS <- bind_rows(results_list)
+  
+  cat("\n\n--- Summary of Statistical Analyses (DeviationsS) ---\n")
+  print(DeviationsS)
+  
+  cat("\nAnalysis complete.\n")
+  
+} else {
+  cat("\n\n--- Could not generate statistical summary as no correlation tests were successful. ---\n")
+  DeviationsS <- data.frame() # Create an empty dataframe if no results
+}
+
+
+
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+
+```
+
+
+
+
+
