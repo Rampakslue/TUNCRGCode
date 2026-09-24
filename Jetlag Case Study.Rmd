@@ -1,0 +1,46 @@
+---
+title: "Jetlag Case Study"
+output: html_notebook
+---
+
+#** Libraries and WD **
+```{r}
+library(GLMMcosinor)
+library(dplyr)
+library(tidyr)
+library(circacompare)
+library(tidyverse)
+library(openxlsx)
+library(brms)
+library(car)
+library(knitr)
+library(fs)
+library(hms)
+
+
+#** Set up Valid Path**
+  # Define base paths for both possible directories
+    base_paths <- c(
+    "E:/OneDrive/TUNCOM/TUNCRG/6. Phase 2 Data/Aging", 
+    "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/6. Phase 2 Data/Aging"
+      )
+  
+  # Find the first existing directory
+    valid_path <- base_paths[file.exists(base_paths)][1]
+  
+
+CoreDatasets <- c("CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP","CorsanoShiftWave")
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+```{r}
+```
+
+
+```{r}
+```
+

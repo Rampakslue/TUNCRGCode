@@ -1,0 +1,267 @@
+---
+title: "Phase 2 Aging Correlation Matrix"
+output: html_notebook
+---
+
+#** Libraries and WD **
+```{r}
+library(GLMMcosinor)
+library(dplyr)
+library(tidyr)
+library(circacompare)
+library(tidyverse)
+library(openxlsx)
+library(openxlsx2)
+library(brms)
+library(rstanarm)
+library(paletteer)
+library(ggcorrplot)
+library(ggpubr)
+
+
+
+#** Set up Valid Path**
+  # Define base paths for both possible directories
+    base_paths <- c(
+    "E:/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging", 
+    "C:/Users/samue/OneDrive/TUNCOM/TUNCRG/06. Phase 2 Data/Aging"
+      )
+  
+  # Find the first existing directory
+    valid_path <- base_paths[file.exists(base_paths)][1]
+
+
+CoreDatasets <- c("CorsanoDatafilled","CorsanoDatalinearMulti", "CorsanoDatalinearSingle", "CorsanoBioDare2Datalinear", "CorsanoBioDare2Datafilled", "CorsanoAnalysismulti", "CorsanoAnalysissingle", "ACC", "SleepAnalysis", "Sleeplinear", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "CorsanoAnalysisCombined", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "CorsanoAnalysisBoth", "CorsanoAnalysisAll")
+
+# Clean up
+rm(list = setdiff(ls(), CoreDatasets))
+```
+
+
+
+#** Export Raw Data Correlation Matrix
+```{r}
+# Data Setup
+  # Full
+  reduced_dataA <- Analysis %>%
+      mutate(weekend = recode(weekend, "weekday" = 1, "weekend" = 2),
+          Age = as.numeric(Age)
+      ) %>%
+      select(-Ethnicity1, -Ethnicity2, -Subject, -weekdays) %>%
+  na.omit()
+
+  # Male
+  reduced_dataAM <- reduced_dataA %>%
+      filter(gender == "male") %>%
+    select(-gender)
+  
+  # Female
+  reduced_dataAF <- reduced_dataA %>%
+    filter(gender == "female") %>%
+    select(-gender)
+  
+  # Finish Full
+  reduced_dataA <- reduced_dataA %>%
+    select(-gender)
+  
+
+# Full Raw
+    # Cor Matrix
+      corr_matrixA <- round(cor(reduced_dataA), 2)
+      cap <- cor_pmat(reduced_dataA)
+    
+    # Graph
+    CorrA <- ggcorrplot(corr_matrixA, hc.order = FALSE, type = "lower", lab = TRUE, insig = "blank", p.mat = cap, sig.level = 0.01,
+                       ggtheme = ggplot2::theme_dark(),
+                      colors = c("#D81B60", "white", "#1E88E5"))
+    
+
+# Male Raw
+    # Cor Matrix
+    corr_matrixAM <- round(cor(reduced_dataAM), 2)
+    capM <- cor_pmat(reduced_dataAM)
+      
+    # Graph
+    CorrAM <- ggcorrplot(corr_matrixAM, hc.order = FALSE, type = "lower", lab = TRUE, insig = "blank", p.mat = capM, sig.level = 0.01,
+                       ggtheme = ggplot2::theme_dark(),
+                      colors = c("#E66100", "white", "#785EF0"))
+
+  
+# Female Raw
+    # Cor Matrix
+    corr_matrixAF <- round(cor(reduced_dataAF), 2)
+    capF <- cor_pmat(reduced_dataAF)
+    
+    # Graph
+    CorrAF <- ggcorrplot(corr_matrixAF, hc.order = FALSE, type = "lower", lab = TRUE, insig = "blank", p.mat = capF, sig.level = 0.01,
+                       ggtheme = ggplot2::theme_dark(),
+                      colors = c("#1AFF1A", "white", "#4B0092"))
+
+    
+    
+#Export Correlation Matrices
+ggsave("./Correlation Matrix/Raw Multicollinearity.png", CorrA, width = 50, height = 50, limitsize = FALSE)
+ggsave("./Correlation Matrix/Raw Multicollinearity Male.png", CorrAM, width = 50, height = 50, limitsize = FALSE)
+ggsave("./Correlation Matrix/Raw Multicollinearity Female.png", CorrAF, width = 50, height = 50, limitsize = FALSE)   
+
+    
+
+# Export Cor Matrices as Excel File
+  wb2 <- createWorkbook()
+  
+  # Apply the condition to filter correlation matrices and replace NA with a numeric value (e.g., 0)
+  filtered_corr_matrixA <- ifelse(cap < 0.01, corr_matrixA, NA)
+  filtered_corr_matrixAM <- ifelse(capM < 0.01, corr_matrixAM, NA)
+  filtered_corr_matrixAF <- ifelse(capF < 0.01, corr_matrixAF, NA)
+  
+  # Function to mask the upper triangle of a matrix
+  mask_upper_triangle <- function(mat) {
+    mat[upper.tri(mat, diag = TRUE)] <- NA
+    return(mat)
+  }
+  
+  # Mask the upper triangles
+  filtered_corr_matrixA <- mask_upper_triangle(filtered_corr_matrixA)
+  filtered_corr_matrixAM <- mask_upper_triangle(filtered_corr_matrixAM)
+  filtered_corr_matrixAF <- mask_upper_triangle(filtered_corr_matrixAF)
+  
+  
+  # Add sheets and write data to them
+  addWorksheet(wb2, "full")
+  writeData(wb2, sheet = "full", filtered_corr_matrixA, rowNames = TRUE)
+  
+  addWorksheet(wb2, "male")
+  writeData(wb2, sheet = "male", filtered_corr_matrixAM, rowNames = TRUE)
+  
+  addWorksheet(wb2, "female")
+  writeData(wb2, sheet = "female", filtered_corr_matrixAF, rowNames = TRUE)
+  
+  # Save the workbook
+  saveWorkbook(wb2, file = "./Correlation Matrix/Raw Correlation Matrix.xlsx", overwrite = TRUE) 
+```
+
+
+
+#** Export Stats Correlation Matrix Data
+```{r}
+# Data Setup
+  # Full
+  reduced_data <- Statistics %>%
+      mutate(
+          week = recode(week, "weekday" = 1, "weekend" = 2),
+          Age = as.numeric(Age)
+      ) %>%
+      select(-Stepsmin, -Ethnicity1, -Ethnicity2, -Subject) %>%
+    na.omit()
+
+  # Male
+  reduced_dataM <- reduced_data %>%
+    filter(gender == "male") %>%
+    select(-gender)
+
+  # Female
+  reduced_dataF <- reduced_data %>%
+    filter(gender == "female") %>%
+    select(-gender)
+  
+  # Finish Full
+  reduced_data <- reduced_data %>%
+    select(-gender)
+
+# Full Stats
+    # Cor Matrix
+    corr_matrix <- round(cor(reduced_data), 2)
+    cmp <- cor_pmat(reduced_data)
+    
+    # Graph
+    Corr <- ggcorrplot(corr_matrix, hc.order = FALSE, type = "lower", lab = TRUE, insig = "blank", p.mat = cmp, sig.level = 0.01,
+                       ggtheme = ggplot2::theme_dark(),
+                      colors = c("#D81B60", "white", "#1E88E5"))
+
+
+# Male Stats
+    # Cor Matrix
+    corr_matrixM <- round(cor(reduced_dataM), 2)
+    cmpM <- cor_pmat(reduced_dataM)
+    
+    # Graph
+    CorrM <- ggcorrplot(corr_matrixM, hc.order = FALSE, type = "lower", lab = TRUE, insig = "blank", p.mat = cmpM, sig.level = 0.01,
+                       ggtheme = ggplot2::theme_dark(),
+                      colors = c("#E66100", "white", "#785EF0"))
+
+  
+# Female Stats
+    # Cor Matrix
+    corr_matrixF <- round(cor(reduced_dataF), 2)
+    cmpF <- cor_pmat(reduced_dataF)
+    
+    # Graph
+    CorrF <- ggcorrplot(corr_matrixF, hc.order = FALSE, type = "lower", lab = TRUE, insig = "blank", p.mat = cmpF, sig.level = 0.01,
+                       ggtheme = ggplot2::theme_dark(),
+                      colors = c("#1AFF1A", "white", "#4B0092"))
+  
+  
+  
+#Export Correlation Matrices
+ggsave("./Correlation Matrix/Statistics Multicollinearity2.png", Corr, width = 50, height = 50, limitsize = FALSE)
+ggsave("./Correlation Matrix/Statistics Multicollinearity Male2.png", CorrM, width = 50, height = 50, limitsize = FALSE)
+ggsave("./Correlation Matrix/Statistics Multicollinearity Female2.png", CorrF, width = 50, height = 50, limitsize = FALSE)
+
+
+
+# Export Cor Matrices as Excel File
+  wb1 <- createWorkbook()
+  
+  # Apply the condition to filter correlation matrices and replace NA with a numeric value (e.g., 0)
+  filtered_corr_matrix <- ifelse(cmp < 0.01, corr_matrix, NA)
+  filtered_corr_matrixM <- ifelse(cmpM < 0.01, corr_matrixM, NA)
+  filtered_corr_matrixF <- ifelse(cmpF < 0.01, corr_matrixF, NA)
+  
+  # Function to mask the upper triangle of a matrix
+  mask_upper_triangle <- function(mat) {
+    mat[upper.tri(mat, diag = TRUE)] <- NA
+    return(mat)
+  }
+  
+  # Mask the upper triangles
+  filtered_corr_matrix <- mask_upper_triangle(filtered_corr_matrix)
+  filtered_corr_matrixM <- mask_upper_triangle(filtered_corr_matrixM)
+  filtered_corr_matrixF <- mask_upper_triangle(filtered_corr_matrixF)
+  
+  
+  # Add sheets and write data to them
+  addWorksheet(wb1, "full")
+  writeData(wb1, sheet = "full", filtered_corr_matrix, rowNames = TRUE)
+  
+  addWorksheet(wb1, "male")
+  writeData(wb1, sheet = "male", filtered_corr_matrixM, rowNames = TRUE)
+  
+  addWorksheet(wb1, "female")
+  writeData(wb1, sheet = "female", filtered_corr_matrixF, rowNames = TRUE)
+  
+  # Save the workbook
+  saveWorkbook(wb1, file = "./Correlation Matrix/Stats Correlation Matrix2.xlsx", overwrite = TRUE)
+  
+```
+
+
+#** Bayesian Networks
+```{r}
+library(bnlearn)
+
+dataLatent <- Statistics %>%
+  mutate(SCNamp = NA) %>%
+  select (SCNamp, CBTamp, SBTamp, RRamp, HRamp, HRVamp, Stepsamp) %>%
+  as.data.frame()
+
+dataLatent$SCNamp <- as.numeric(dataLatent$SCNamp)
+
+
+dag1 <- model2network("[SCNamp][CBTamp:SBTamp|SCNamp][SCNamp|RRamp:HRamp][HRamp|SCNamp][HRVamp|SCNamp][Stepsamp|SCNamp][CBTamp|HRamp][HRVamp|RRamp:HRamp]")
+
+
+
+```
+
+
+

@@ -425,8 +425,416 @@ rm(list = setdiff(ls(), CoreDatasets))
 
 
 
+#**================================================================**
+#** CORE SLEEP PROCESSING CODE FIXED                               **
+#**================================================================**
+```{r}
+
+# --- Define Patients to Remove ---
+# Add the Subject/Patient IDs of any individuals with unreliable data to this list.
+patients_to_remove <- c(
+  # "SUBJECT_ID_TO_REMOVE_1", # Example: "ABCD123"
+  # "SUBJECT_ID_TO_REMOVE_2"  # Add more IDs as needed
+)
+
+# --- Filter Main Dataframes ---
+# This removes the specified subjects from all primary data sources at the start.
+if (length(patients_to_remove) > 0 && !all(startsWith(patients_to_remove, "SUBJECT_ID"))) {
+    if (exists("Stat")) {
+      Stat <- Stat %>% filter(!Patient %in% patients_to_remove)
+    }
+    if (exists("SleepAnalysis")) {
+      SleepAnalysis <- SleepAnalysis %>% filter(!Subject %in% patients_to_remove)
+    }
+    if (exists("CorsanoAnalysismulti")) {
+      CorsanoAnalysismulti <- CorsanoAnalysismulti %>% filter(!Subject %in% patients_to_remove)
+    }
+    if (exists("CorsanoAnalysissplit")) {
+      CorsanoAnalysissplit <- CorsanoAnalysissplit %>% filter(!Subject %in% patients_to_remove)
+    }
+    if (exists("CorsanoAnalysisWave")) {
+      CorsanoAnalysisWave <- CorsanoAnalysisWave %>% filter(!Subject %in% patients_to_remove)
+    }
+    cat("Removed", length(patients_to_remove), "subjects from the analysis.\n")
+}
 
 
+#**================================================================**
+#** Part 1: Initial Sleep Data Processing                          **
+#**================================================================**
+
+# --- Prepare and Bin Sleep Data to Attach ---
+Sleeptmp <- SleepAnalysis %>%
+  mutate(Time_hrs = Time / 60) %>%
+  mutate(Time_binned = round(Time_hrs * 6) / 6) %>%
+  group_by(Time_binned, Subject) %>%
+  summarise(SleepStages = round(mean(SleepStages, na.rm = TRUE)), .groups = 'drop')
+
+# --- Attach Sleep Data and Define Consistent Weekday/Weekend Status ---
+CorsanoAnalysisSleepmulti <- CorsanoAnalysismulti %>%
+  mutate(Time_binned = round(Time * 6) / 6) %>%
+  left_join(Sleeptmp, by = c("Subject", "Time_binned")) %>%
+  mutate(Time = Time_binned) %>%
+  select(-Time_binned) %>%
+  mutate(
+    Sleep = ifelse(is.na(SleepStages), 0, 1),
+    Time24 = Time %% 24,
+    Week = case_when(
+      Day == "Friday" & Time24 >= 18 ~ "Weekend",
+      Day == "Sunday" & Time24 >= 18 ~ "Weekday",
+      Day %in% c("Saturday", "Sunday") ~ "Weekend",
+      TRUE ~ "Weekday"
+    )
+  ) %>%
+  filter(!is.na(Day)) %>%
+  select(-Time24)
 
 
+# --- Create the Master 1-Minute Timeline ---
+# Function to identify the consolidated sleep period WITHIN a given session.
+identify_consolidated_sleep <- function(df) {
+  if (!any(df$SleepStages %in% c(1, 2, 3))) {
+    return(df %>% mutate(in_sleep_period = FALSE))
+  }
+  sleep_blocks <- df %>%
+    mutate(is_sleep = SleepStages %in% c(1, 2, 3),
+           sleep_block_id = rleid(is_sleep)) %>%
+    filter(is_sleep) %>%
+    group_by(sleep_block_id) %>%
+    filter(n() >= 20)
+  if (nrow(sleep_blocks) == 0) {
+    return(df %>% mutate(in_sleep_period = FALSE))
+  }
+  start_period <- min(sleep_blocks$Time, na.rm = TRUE)
+  end_period <- df %>% 
+    filter(SleepStages %in% c(1,2,3)) %>%
+    summarise(max_time = max(Time, na.rm=TRUE)) %>%
+    pull(max_time)
+  df %>%
+    mutate(in_sleep_period = Time >= start_period & Time <= end_period)
+}
+
+# Create a base dataframe with all necessary columns
+CorsanoAnalysisSleepexpand_base <- CorsanoAnalysisSleepmulti %>%
+  group_by(Subject, Week) %>%
+  reframe(Time = seq(min(Time, na.rm = TRUE), max(Time, na.rm = TRUE), by = 1/60)) %>%
+  ungroup() %>%
+  left_join(CorsanoAnalysisSleepmulti, by = c("Subject", "Week", "Time")) %>%
+  mutate(Time_rounded = round(Time, 5)) %>%
+  left_join(
+    SleepAnalysis %>%
+      mutate(Time_rounded = round(Time / 60, 5)) %>%
+      select(-Time), 
+    by = c("Subject", "Time_rounded")
+  ) %>%
+  mutate(Bed = if_else(!is.na(SleepStages.y), 1, 0)) %>%
+  rename(SleepStages = SleepStages.y) %>%
+  select(-SleepStages.x, -Time_rounded)
+  
+# NEW LOGIC: Correctly identifies sleep sessions based on an 8-hour gap in "Bed" time.
+in_bed_blocks <- CorsanoAnalysisSleepexpand_base %>%
+  filter(Bed == 1) %>%
+  group_by(Subject) %>%
+  mutate(block_id = cumsum(c(0, diff(Time)) > 1/60 + 0.001)) %>%
+  group_by(Subject, block_id) %>%
+  summarise(start_time = min(Time), end_time = max(Time), .groups = 'drop') %>%
+  group_by(Subject) %>%
+  mutate(gap_from_prev = start_time - lag(end_time, default = first(start_time) - 9)) %>%
+  mutate(SleepSession = cumsum(gap_from_prev > 8)) %>%
+  select(Subject, start_time, end_time, SleepSession)
+
+# Map the correct SleepSession ID back to the main dataframe
+CorsanoAnalysisSleepexpand <- CorsanoAnalysisSleepexpand_base %>%
+  left_join(in_bed_blocks, by = "Subject") %>%
+  filter(Time >= start_time & Time <= end_time) %>%
+  group_by(Subject, SleepSession) %>%
+  do(identify_consolidated_sleep(.)) %>%
+  ungroup() %>%
+  mutate(
+    Sleep = if_else(in_sleep_period, SleepSession, 0),
+    SleepStages = if_else(is.na(SleepStages), 4, SleepStages)
+  ) %>%
+  select(any_of(colnames(CorsanoAnalysisSleepexpand_base)), Sleep)
+
+
+#**================================================================**
+#** Part 2: Advanced Chronotype & Sleep Quality Analysis           **
+#**================================================================**
+
+#=============== Helper Functions ===============#
+# --- CRITICAL: Load pracma for findpeaks ---
+if (!require("pracma")) {
+  warning("The 'pracma' package is not installed. Trying to install it now...")
+  install.packages("pracma")
+  library(pracma)
+} else {
+  library(pracma)
+}
+
+find_peak_phase <- function(data, column) {
+  # Safety check if column exists
+  if (!column %in% names(data)) return(NA)
+  if (nrow(data) < 5) return(NA) # Not enough data points to find a peak
+  
+  # Handle errors in findpeaks explicitly and PRINT the error if it occurs
+  peaks <- tryCatch({
+    findpeaks(data[[column]], minpeakheight = -Inf, minpeakdistance = 1, threshold = 0)
+  }, error = function(e) {
+    cat("Error in find_peak_phase for column", column, ":", e$message, "\n")
+    return(NULL)
+  })
+  
+  if (is.null(peaks)) return(NA)
+  highest_peak_index <- peaks[which.max(peaks[, 1]), 2]
+  return(data$Time[highest_peak_index])
+}
+
+safe_which_min_time <- function(time_col, value_col) {
+  valid_indices <- !is.na(value_col)
+  if (!any(valid_indices)) return(NA_real_)
+  return(time_col[valid_indices][which.min(value_col[valid_indices])])
+}
+
+safe_which_max_time <- function(time_col, value_col) {
+  valid_indices <- !is.na(value_col)
+  if (!any(valid_indices)) return(NA_real_)
+  return(time_col[valid_indices][which.max(value_col[valid_indices])])
+}
+
+#=============== Main Analysis Function ===============#
+process_all_metrics <- function(subject_sleep_expand, subject_split, subject_wave, week_type) {
+  if (nrow(subject_sleep_expand) == 0) return(NULL)
+   
+  subjectid <- unique(subject_sleep_expand$Subject)
+  Test1 <- subject_split
+  
+  # --- CRITICAL FIX: Filter Wave Data by Week ---
+  # Previously, this only filtered by Time, causing duplicates (Weekday + Weekend rows together)
+  # which messed up the cosine curves for findpeaks.
+  if ("Week" %in% names(subject_wave)) {
+    Test2 <- subject_wave %>% filter(Week == week_type, Time <= 24)
+  } else {
+    Test2 <- subject_wave %>% filter(Time <= 24)
+  }
+  
+  # Debug print if Test2 is empty (helps identify if Week names mismatch)
+  if (nrow(Test2) == 0) {
+    cat("Warning: No wave data found for Subject", subjectid, "Week:", week_type, "\n")
+  }
+
+  #--- NEW MP & medianSL Calculation ---
+  sleep_periods_info <- subject_sleep_expand %>%
+    filter(Bed == 1) %>%
+    group_by(Subject) %>%
+    mutate(time_gap = c(0, diff(Time))) %>%
+    mutate(period_id = cumsum(time_gap > 1/60 + 0.001)) %>%
+    group_by(Subject, period_id) %>%
+    summarise(start_time = min(Time), end_time = max(Time), .groups = 'drop') %>%
+    group_by(Subject) %>%
+    mutate(gap_from_prev = start_time - lag(end_time, default = first(start_time) - 9)) %>%
+    mutate(unique_sleep_period_id = cumsum(gap_from_prev > 8)) %>%
+    mutate(duration_hours = end_time - start_time) %>%
+    filter(duration_hours >= 3 & duration_hours <= 12)
+
+  if(nrow(sleep_periods_info) > 0) {
+    period_metrics <- sleep_periods_info %>%
+      mutate(data = map2(start_time, end_time, ~subject_sleep_expand %>% filter(Time >= .x, Time <= .y))) %>%
+      mutate(
+        Bed_start_time = start_time,
+        Sleep_start_time = map_dbl(data, function(period_data) {
+          sleep_onset_data <- period_data %>%
+            filter(SleepStages %in% c(1, 2, 3) & lag(SleepStages, default = 4) == 4)
+          if (nrow(sleep_onset_data) > 0) first(sleep_onset_data$Time) else NA_real_
+        }),
+        End_time = end_time,
+        sleep_latency_minutes = if_else(!is.na(Sleep_start_time), (Sleep_start_time - Bed_start_time) * 60, NA_real_),
+        adjusted_end_time = if_else(End_time < Sleep_start_time, End_time + 24, End_time),
+        mp_continuous = if_else(!is.na(Sleep_start_time), (Sleep_start_time + adjusted_end_time) / 2, NA_real_),
+        mp_24h = mp_continuous %% 24,
+        mp_centered = if_else(mp_24h > 12, mp_24h - 24, mp_24h)
+      )
+    
+    final_MP <- mean(period_metrics$mp_centered, na.rm = TRUE)
+    valid_latencies <- period_metrics %>% filter(sleep_latency_minutes <= 60)
+    final_medianSL <- median(valid_latencies$sleep_latency_minutes, na.rm = TRUE)
+  } else {
+    final_MP <- NA_real_
+    final_medianSL <- NA_real_
+  }
+
+  #--- Other Core Sleep Metrics ---#
+  sleep_time_epochs <- sum(subject_sleep_expand$Sleep != 0, na.rm = TRUE)
+  bed_time_epochs <- sum(subject_sleep_expand$Bed == 1, na.rm = TRUE)
+  SE <- if (bed_time_epochs > 0) (sleep_time_epochs / bed_time_epochs) * 100 else 0
+  total_sleep_hours <- sleep_time_epochs / 60
+  sleep_lagged <- subject_sleep_expand %>% mutate(prev_stage = lag(SleepStages))
+  trans1 <- sleep_lagged %>% filter((prev_stage %in% c(1, 3)) & (SleepStages %in% c(2, 4))) %>% nrow()
+  FI1 <- if (total_sleep_hours > 0) trans1 / total_sleep_hours else 0
+  trans2 <- sleep_lagged %>% filter(!is.na(prev_stage) & prev_stage != SleepStages) %>% nrow()
+  FI2 <- if (total_sleep_hours > 0) trans2 / total_sleep_hours else 0
+   
+  #--- Chronotype: Physiological Nadirs ---#
+  min_values <- cbind(
+    summarise(Test1, minCBT=safe_which_min_time(Time,CBT), maxSBT=safe_which_max_time(Time,SBT), minHR=safe_which_min_time(Time,HR), minCor=safe_which_min_time(Time,Cortisol)),
+    summarise(Test2, minBreath=safe_which_min_time(Time,BreathCosine), minHRV=safe_which_min_time(Time,HRVCosine))
+  ) %>% mutate(across(everything(), ~ ifelse(!is.na(.) & . > 12, . - 24, .)))
+  all_mins <- unlist(min_values)
+  midrange <- mean(c(median(all_mins, na.rm=TRUE), mean(all_mins, na.rm=TRUE)), na.rm=TRUE)
+  MAD <- mean(abs(all_mins - midrange), na.rm = TRUE) * 60
+  weights <- c(0.25, 0.2, 0.15, 0.2, 0.1, 0.1)
+  WMAD <- sum(abs(all_mins - midrange) * weights, na.rm = TRUE) / 6 * 60
+   
+  #--- Chronotype: Lark vs. Owl ---#
+  mid <- ifelse(!is.na(midrange) & midrange > 14, midrange - 24, midrange)
+  Lark <- pmax(0, pmin(100, (-(mid - 2) / 8 + 0.5) * 100))
+   
+  #--- Chronotype: Energy/Activity Peak ---#
+  # Safety Check: Ensure Test2 has data before running findpeaks
+  if (nrow(Test2) > 10) {
+    PA <- find_peak_phase(Test2, "StepsCosine")
+    TA_cos <- find_peak_phase(Test2 %>% mutate(StepsCosine = -StepsCosine), "StepsCosine")
+    AEarly <- if (!is.na(PA) && !is.na(TA_cos)) pmax(0, pmin(100, (-(PA - (TA_cos+12)) / 8 + 0.5) * 100)) else NA
+  } else {
+    AEarly <- NA
+  }
+
+  #--- Rapid vs. Sluggish Wake Up ---#
+  metrics <- c("CBTCosine", "HRCosine", "BreathCosine", "HRVCosine", "CortisolCosine", "StressCosine", "-SBTCosine", "-RRCosine")
+  
+  if (nrow(Test2) > 10) {
+    results_list <- lapply(metrics, function(metric) {
+      metric_name <- sub("-", "", metric)
+      
+      # Check if column exists
+      if(!metric_name %in% names(Test2)) return(NULL)
+      
+      y <- if(startsWith(metric,"-")) -Test2[[metric_name]] else Test2[[metric_name]]
+      if(all(is.na(y))) return(NULL)
+      
+      x <- Test2$Time
+      y_doubled <- c(y, y); x_doubled <- c(x, x + 24); min_index <- which.min(y)
+      
+      peaks <- tryCatch({
+        findpeaks(y_doubled[min_index:(min_index + length(y))])
+      }, error = function(e) {
+        cat("Error in Rapid/Sluggish findpeaks:", e$message, "\n")
+        return(NULL)
+      })
+      if(is.null(peaks)) return(NULL)
+      
+      peak_index <- min_index + peaks[1, 2] - 1
+      if (length(peak_index) == 0 || peak_index == min_index) return(NULL)
+      
+      slope_upward <- (y_doubled[peak_index] - y_doubled[min_index]) / (x_doubled[peak_index] - x_doubled[min_index])
+      highest_peak_index <- which.max(y)
+      
+      troughs <- tryCatch({
+        findpeaks(-y_doubled[highest_peak_index:(highest_peak_index + length(y))])
+      }, error = function(e) { return(NULL) })
+      if(is.null(troughs)) return(NULL)
+      
+      next_min_index <- highest_peak_index + troughs[1, 2] - 1
+      if(length(next_min_index) == 0 || next_min_index == highest_peak_index) return(NULL)
+      
+      slope_downward <- -(y_doubled[next_min_index] - y_doubled[highest_peak_index]) / (x_doubled[next_min_index] - x_doubled[highest_peak_index])
+      amplitude <- (max(y, na.rm=T) - min(y, na.rm=T)) / 2; mid_slope <- (max(y, na.rm=T) - min(y, na.rm=T)) / 12
+      
+      if(amplitude == 0) return(NULL)
+      
+      AAARapid <- pmax(0, pmin(100, (((slope_upward - mid_slope) / amplitude / 2 * 10) + 0.5) * 100))
+      ABAFast <- pmax(0, pmin(100, (((slope_downward - mid_slope) / amplitude / 2 * 10) + 0.5) * 100))
+      
+      return(data.frame(AAARapid, ABAFast))
+    })
+    
+    wake_sleep_metrics <- do.call(rbind, results_list)
+  } else {
+    wake_sleep_metrics <- NULL
+  }
+  
+  # === FIX FOR MEAN ===
+  if (!is.null(wake_sleep_metrics) && nrow(wake_sleep_metrics) > 0) {
+    AAARapid_avg <- mean(wake_sleep_metrics$AAARapid, na.rm = TRUE)
+    ABAFast_avg <- mean(wake_sleep_metrics$ABAFast, na.rm = TRUE)
+  } else {
+    AAARapid_avg <- NA_real_
+    ABAFast_avg <- NA_real_
+  }
+
+  #--- Combine All Results ---#
+  midrangeC <- if_else(!is.na(midrange) & midrange < 0, midrange + 24, midrange)
+   
+  return(data.frame(
+    Patient = subjectid, Week = week_type, medianSL = final_medianSL, SE = SE, FI1 = FI1, FI2 = FI2, MP = final_MP,
+    midrange = midrange, midrangeC = midrangeC, WMAD = WMAD, MAD = MAD, L = Lark, O = 100 - Lark, E = AEarly, D = 100 - AEarly,
+    R = AAARapid_avg, S = 100 - AAARapid_avg, F = ABAFast_avg, I = 100 - ABAFast_avg
+  ))
+}
+
+#=============== Execute the Analysis Loop ===============#
+
+# --- Reclassify Week for Consistency ---
+CorsanoAnalysissplit_reclassified <- CorsanoAnalysissplit %>%
+  mutate(
+    Time24 = Time %% 24,
+    Week = case_when(
+      Day == "Friday" & Time24 >= 18 ~ "Weekend",
+      Day == "Sunday" & Time24 >= 18 ~ "Weekday",
+      Day %in% c("Saturday", "Sunday") ~ "Weekend",
+      TRUE ~ "Weekday"
+    )
+  ) %>% select(-Time24)
+
+# --- Create Task List ---
+analysis_groups <- bind_rows(
+  distinct(CorsanoAnalysissplit_reclassified, Subject, Week) %>% filter(!is.na(Week)),
+  distinct(CorsanoAnalysissplit_reclassified, Subject) %>% mutate(Week = "Both")
+)
+
+# --- Run Analysis Loop ---
+all_subject_results <- lapply(1:nrow(analysis_groups), function(i) {
+  current_subject <- analysis_groups$Subject[i]
+  current_week <- analysis_groups$Week[i]
+  cat("Processing Patient:", current_subject, "for Week:", current_week, "\n")
+  
+  subject_wave <- filter(CorsanoAnalysisWave, Subject == current_subject)
+  
+  if (current_week == "Both") {
+    subject_sleep_expand <- filter(CorsanoAnalysisSleepexpand, Subject == current_subject)
+    subject_split <- filter(CorsanoAnalysissplit_reclassified, Subject == current_subject)
+  } else {
+    subject_sleep_expand <- filter(CorsanoAnalysisSleepexpand, Subject == current_subject, Week == current_week)
+    subject_split <- filter(CorsanoAnalysissplit_reclassified, Subject == current_subject, Week == current_week)
+  }
+  
+  process_all_metrics(subject_sleep_expand, subject_split, subject_wave, current_week)
+})
+
+SLEEP <- bind_rows(all_subject_results) %>%
+  rename(week = Week)
+
+
+#**================================================================**
+#** Part 3: Final Join and Export                                  **
+#**================================================================**
+
+# --- Attach all calculated stats together ---
+StatSS <- Stat %>%
+  full_join(SLEEP, by = c("Patient", "week")) %>%
+  select(-any_of("NOCODE")) %>%
+  # NEW: Add the MPC (MP Converted) column for easier interpretation
+  mutate(MPC = if_else(!is.na(MP) & MP < 0, MP + 24, MP))
+
+
+# --- Export the Final Data ---
+export_path <- file.path(valid_path, "Stats", "Full_Statistics_Sleep_Combined.xlsx")
+export_path_2 <- file.path(valid_path, "Outputs","CorsanoAnalysisWave.xlsx")
+write.xlsx(StatSS, export_path, rowNames = FALSE, firstRow = TRUE)
+write.xlsx(CorsanoAnalysisWave, export_path_2, rowNames=FALSE, firstRow = TRUE)
+
+cat("Analysis complete. Data exported to:", export_path, "\n")
+
+# --- Final Clean Up ---
+rm(list = setdiff(ls(), CoreDatasets))
+```
 

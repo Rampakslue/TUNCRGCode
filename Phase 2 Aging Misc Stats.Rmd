@@ -20,6 +20,8 @@ pacman::p_load(
   lubridate,      # For easier date-time manipulation
   data.table,     # For efficient data handling, especially rleid
   pracma,         # For findpeaks
+  lomb,           # For periodogram
+  broom,          # For cleaning t-tests
   GLMMcosinor,    # For generalized linear mixed cosinor models
   circacompare,   # For comparing circadian rhythms
   tidyverse,      # A collection of R packages for data science
@@ -41,8 +43,7 @@ pacman::p_load(
   rstatix,
   hms,
   fs,
-  car
-  
+  car,
 )
 
 #** --- Set up a valid path --- *
@@ -62,7 +63,7 @@ if (is.na(valid_path)) {
 #** --- Define objects to keep --- *
 # This list helps in managing the global environment
 CoreDatasets <- c(
-"CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP", "CorsanoShiftWave", "Variability", "Stability", "SJL", "StatSS", "SLEEP1", "AmpMesAge", "AmpMesGen", "BioBmiStats", "DeviationsS", "SJLDeviations", "SJLBIO", "jsl_summary", "Jetlag", "biolist", "PhysCog", "Aging", "AgingA", "SJL2", "SJLBio"
+"CorsanoAnalysismulti", "CorsanoAnalysissingle", "CorsanoAnalysisSleepexpand", "SleepAnalysis", "StatS", "CoreDatasets", "subjects", "SplitModel2", "Statistics", "biomarkers", "SleepStat", "Analysis", "CorsanoAnalysissplit", "valid_path", "processed_subjects", "Stat", "processed_subjects1", "processed_subjects2", "processed_subjects3", "CorsanoAnalysisAll", "Shiftwork", "Shiftwork2", "ShiftStat", "Sleepwork", "CorsanoAnalysisSleepmulti", "CorsanoAnalysisSleepsingle", "CorsanoAnalysisWave", "PhaseDiff", "SLEEP", "CorsanoShiftWave", "Variability", "Stability", "SJL", "StatSS", "SLEEP1", "AmpMesAge", "AmpMesGen", "BioBmiStats", "DeviationsS", "SJLDeviations", "SJLBIO", "jsl_summary", "Jetlag", "biolist", "PhysCog", "Aging", "AgingA", "SJL2", "SJLBio","StatSSS", "TTest"
 )
 
 # Biolist
@@ -152,114 +153,268 @@ results5
 
 
 
-
-
-
-
-
-#** Quick Export**
+#** Quantifying the slopes and FWHM
 ```{r}
-export_path <- paste0(valid_path, "/Stats/StatsWide.xlsx")
-          write.xlsx(Statistics, export_path, rowNames = FALSE, firstRow = TRUE)
-```
-
-
-
-
-```{r}
-StatSSS <- StatSS %>%
- mutate(TPhase = ifelse(TPhase > 12, TPhase - 24, TPhase))
-
-
-# --- STEP 1: Identify the duplicates (Optional but recommended) ---
-# Run this block to SEE which patients have duplicate entries causing the error
-duplicates <- StatSS %>%
-  filter(week == "Weekday") %>%       # Look only at the data you care about
-  count(Patient, week, Bio) %>%       # Count occurrences
-  filter(n > 1)                       # Keep only those appearing more than once
-
-print("The following patients have duplicate entries:")
-
-
-#*** Positive TPhase ***
-# --- STEP 2: The Corrected Pipeline ---
-Statistics <- StatSS %>%
-  # FIX 1: Filter BEFORE pivoting. 
-  filter(week == "Weekday") %>%
-   
-  # Rename columns
-  rename(amp = Amplitude, mesor = Mesor) %>%
-   
-  # Select columns
-  select(Patient, week, Bio, amp, mesor, PPhase, TPhase, MAD, L, O, E, D, R, S, F, I, FI1, FI2) %>%
-   
-  # FIX 2: Remove exact duplicates
-  distinct() %>% 
+# 1. Define the morphology extraction function
+calculate_morphology_metrics <- function(df, x_col = "Time", y_col = "CosineValue") {
   
-  # FIX 2.5: Remove NAs from Bio (NEW ADDITION)
-  # This ensures you don't get columns named "NA_amp" or "NA_mesor"
-  drop_na(Bio) %>%
-   
-  # FIX 3: Pivot Wider with a safety aggregation
-  pivot_wider(
-    id_cols = c(Patient, week, MAD, L, O, E, D, R, S, F, I, FI1, FI2), 
-    names_from = Bio, 
-    values_from = c(amp, mesor, PPhase, TPhase), 
-    names_glue = "{Bio}{.value}",
-    
-    # FIX 4: Handle remaining duplicates
-    values_fn = mean 
-  )
+  # Ensure the target column exists
+  if (!y_col %in% names(df)) {
+    return(data.frame(
+      FWHM_hours = NA,
+      Max_Ascending_Slope = NA,
+      Max_Descending_Slope = NA
+    ))
+  }
 
-
-#*** Negative TPhase ***
-# --- STEP 2: The Corrected Pipeline ---
-StatisticsS <- StatSSS %>%
-  # FIX 1: Filter BEFORE pivoting. 
-  filter(week == "Weekday") %>%
-   
-  # Rename columns
-  rename(amp = Amplitude, mesor = Mesor) %>%
-   
-  # Select columns
-  select(Patient, week, Bio, amp, mesor, PPhase, TPhase, MAD, L, O, E, D, R, S, F, I, FI1, FI2) %>%
-   
-  # FIX 2: Remove exact duplicates
-  distinct() %>% 
+  # Sort by time to ensure sequential differences
+  df <- df[order(df[[x_col]]), ]
   
-  # FIX 2.5: Remove NAs from Bio (NEW ADDITION)
-  # This ensures you don't get columns named "NA_amp" or "NA_mesor"
-  drop_na(Bio) %>%
-   
-  # FIX 3: Pivot Wider with a safety aggregation
-  pivot_wider(
-    id_cols = c(Patient, week, MAD, L, O, E, D, R, S, F, I, FI1, FI2), 
-    names_from = Bio, 
-    values_from = c(amp, mesor, PPhase, TPhase), 
-    names_glue = "{Bio}{.value}",
-    
-    # FIX 4: Handle remaining duplicates
-    values_fn = mean 
-  )
-
-
-
-```
-
-
-```{r}
-# 1. Create a function to Identify outliers
-# This calculates the 25th and 75th percentiles
-is_outlier <- function(x) {
-  return(x < quantile(x, 0.25, na.rm = TRUE) - 1.5 * IQR(x, na.rm = TRUE) | 
-         x > quantile(x, 0.75, na.rm = TRUE) + 1.5 * IQR(x, na.rm = TRUE))
+  # Calculate slopes using the full 48-hour data
+  t_full <- df[[x_col]]
+  y_full <- df[[y_col]]
+  
+  dy <- diff(y_full)
+  dt <- diff(t_full)
+  
+  # Prevent division by zero
+  dt[dt == 0] <- NA 
+  slopes <- dy / dt
+  
+  # Handle cases where slopes might be all NA to prevent warnings
+  if(all(is.na(slopes))) {
+     max_asc_slope <- NA
+     max_desc_slope <- NA
+  } else {
+     max_asc_slope <- max(slopes, na.rm = TRUE)
+     max_desc_slope <- min(slopes, na.rm = TRUE)
+  }
+  
+  # Isolate the first 24 hours to cleanly calculate one peak's FWHM
+  df_24h <- df[df[[x_col]] <= 24, ]
+  t <- df_24h[[x_col]]
+  y <- df_24h[[y_col]]
+  
+  # Calculate FWHM thresholds
+  if(all(is.na(y))) {
+     fwhm <- NA
+  } else {
+      max_y <- max(y, na.rm = TRUE)
+      min_y <- min(y, na.rm = TRUE)
+      half_max <- min_y + (max_y - min_y) / 2
+      
+      # Normalize the curve around the half-maximum threshold
+      y_shifted <- y - half_max
+      
+      # Identify indices where the curve crosses the half-maximum
+      crossings <- which(diff(sign(y_shifted)) != 0)
+      
+      crossing_times <- numeric(length(crossings))
+      
+      # Linearly interpolate the exact crossing time for precision
+      for (i in seq_along(crossings)) {
+        idx <- crossings[i]
+        t0 <- t[idx]; t1 <- t[idx+1]
+        y0 <- y_shifted[idx]; y1 <- y_shifted[idx+1]
+        
+        # Avoid division by zero
+        if ((y1 - y0) != 0) {
+          crossing_times[i] <- t0 - y0 * (t1 - t0) / (y1 - y0)
+        } else {
+          crossing_times[i] <- t0
+        }
+      }
+      
+      # Calculate FWHM
+      fwhm <- NA
+      if (length(crossing_times) >= 2) {
+        fwhm <- abs(crossing_times[2] - crossing_times[1])
+      }
+  }
+  
+  # Output the results
+  return(data.frame(
+    FWHM_hours = fwhm,
+    Max_Ascending_Slope = max_asc_slope,
+    Max_Descending_Slope = max_desc_slope
+  ))
 }
 
-# 2. Create a clean version of the data
-# We filter out rows where EITHER EnergyTPhase OR CBTTPhase are outliers
-StatisticsS <- StatisticsS %>%
-  filter(!is_outlier(EnergyTPhase) & !is_outlier(CBTTPhase) & !is_outlier(HRVTPhase) & !is_outlier(BreathTPhase))
+# 2. Reshape the data to create the 'Bio' column
+# This finds all columns ending in "Cosine" (like CBTCosine, HRCosine)
+# It strips "Cosine" to make the "Bio" column, and puts the values in "CosineValue"
+long_wave <- CorsanoAnalysisWave %>%
+  pivot_longer(
+    cols = ends_with("Cosine"), 
+    names_to = "Bio",
+    names_pattern = "(.*)Cosine", 
+    values_to = "CosineValue"
+  ) %>%
+  filter(!is.na(CosineValue)) # Optional: removes empty rows to speed up processing
+
+# 3. Apply the function across all combinations
+morphology_results <- long_wave %>%
+  group_by(Subject, Week, Bio) %>%
+  group_modify(~ calculate_morphology_metrics(.x, x_col = "Time", y_col = "CosineValue")) %>%
+  ungroup()
+
+# 4. Merge into the Stat dataframe
+# Aligns "Patient" to "Subject" and "week" to "week"
+morphology_results <- morphology_results %>%
+  rename(week = Week)
+
+StatSSS <- StatSS %>%
+  left_join(morphology_results, by = c("Patient" = "Subject", "week" = "week", "Bio" = "Bio"))
+
+
+# 5. Export
+# Assuming Stat_Combined is supposed to be StatSSS
+export_path <- paste0(valid_path, "/Stats/StatSSS.xlsx")
+write.xlsx(StatSSS, export_path, rowNames = FALSE, firstRow = TRUE)
 ```
+
+
+
+#** Measuring Period
+```{r}
+# 1. Filter the dataset as requested
+temp2 <- CorsanoAnalysissplit %>%
+  filter(Week == "Weekday")
+
+# 2. Sequentialize the Time variable (Weekdays only)
+# Removed Saturday and Sunday from offsets
+day_offsets <- c("Monday" = 0, "Tuesday" = 24, "Wednesday" = 48, 
+                 "Thursday" = 72, "Friday" = 96)
+
+# Enforce Weekday filtering, remove Time == 24, and calculate Cumulative_Time
+temp2_seq <- temp2 %>%
+  filter(!is.na(Day)) %>%
+  filter(Time < 24) %>% # Truncates the day at 23.833
+  mutate(Day = factor(Day, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday"))) %>%
+  arrange(Subject, Day, Time) %>%
+  mutate(Cumulative_Time = Time + day_offsets[as.character(Day)])
+
+# 3. Initialize an empty dataframe to store the period estimates
+# Updated 'Biomarker' to 'Bio' and changed 'Period' to character to accept "Error"
+period_results <- data.frame(Subject = character(),
+                             Bio = character(),
+                             Period = character(),
+                             P_Value = numeric(),
+                             stringsAsFactors = FALSE)
+
+# 4. Execute the nested loop for Subjects and Biomarkers
+subjects <- unique(temp2_seq$Subject)
+
+for (sub in subjects) {
+  # Subset data for the current subject
+  sub_data <- temp2_seq %>% filter(Subject == sub)
+  
+  for (bio in biolist) {
+    # Isolate time and the specific biomarker, removing NAs
+    clean_data <- sub_data %>%
+      select(Cumulative_Time, all_of(bio)) %>%
+      na.omit()
+    
+    # Run periodogram if there is sufficient data (e.g., > 10 valid data points)
+    if (nrow(clean_data) > 10) {
+      lomb_res <- lsp(clean_data[[bio]], times = clean_data$Cumulative_Time, 
+                      from = 12, to = 36, type = "period", plot = FALSE)
+      
+      p_val <- lomb_res$p.value
+      
+      # Conditional logic to check p-value significance
+      if (p_val > 0.05) {
+        dom_period <- "Error"
+      } else {
+        dom_period <- as.character(lomb_res$peak.at[1])
+      }
+      
+    } else {
+      dom_period <- NA 
+      p_val <- NA # Assign NA if insufficient data to avoid errors
+    }
+    
+    # Append the results to the storage dataframe
+    period_results <- rbind(period_results, 
+                            data.frame(Subject = sub, 
+                                       Bio = bio, 
+                                       Period = dom_period,
+                                       P_Value = p_val,
+                                       stringsAsFactors = FALSE)) 
+  }
+}
+
+period_results <- period_results %>%
+  select("Subject", "Bio","Period")
+
+
+
+StatSSS <- StatSSS %>%
+  left_join(period_results, by = c("Patient" = "Subject", "Bio" = "Bio"))
+
+
+# 5. Export
+# Assuming Stat_Combined is supposed to be StatSSS
+export_path <- paste0(valid_path, "/Stats/StatSSS.xlsx")
+write.xlsx(StatSSS, export_path, rowNames = FALSE, firstRow = TRUE)
+
+```
+
+
+#** Stat Analysis of Period and Phase 
+```{r}
+# Settting Age Groups
+filtered_data <- StatSSS %>%
+  filter(week == "Weekday") %>%
+  mutate(AgeGroup = case_when(
+    age <= 40 ~ "Young",
+    age >= 60 ~ "Old",
+    TRUE ~ NA_character_ # This assigns NA to anyone aged 41-59
+    )) %>%
+  filter(!is.na(AgeGroup))
+
+
+# Reshaping Dataframe
+long_data <- filtered_data %>%
+  mutate(across(c(Amplitude, Mesor, Period, PPhase, TPhase), as.numeric)) %>%
+  pivot_longer(
+    cols = c(Amplitude, Mesor, Period, PPhase, TPhase),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  filter(!is.na(Value))
+
+
+# T-Testing
+t_test_results <- long_data %>%
+  group_by(Bio, Metric) %>%
+  filter(sum(AgeGroup == "Young") >= 2 & sum(AgeGroup == "Old") >= 2) %>%
+  group_modify(~ broom::tidy(t.test(Value ~ AgeGroup, data = .x))) %>%
+  ungroup()
+  
+
+
+#Renaming:
+TTest <- t_test_results %>%
+  rename(
+    difference = estimate,
+    Old = estimate1,
+    Young = estimate2
+  ) %>%
+  select(-c(method, alternative, statistic, parameter)) %>%
+  # Add the boolean column for significance using an alpha of 0.05
+  mutate(Significant = p.value < 0.05)
+
+
+
+# 5. Export
+# Assuming Stat_Combined is supposed to be StatSSS
+export_path <- paste0(valid_path, "/Stats/TTests.xlsx")
+write.xlsx(TTest, export_path, rowNames = FALSE, firstRow = TRUE)
+
+```
+
+
 
 
 
@@ -283,7 +438,6 @@ ggscatter(StatisticsA, x = "MP", y = "midrange",
           cor.coef = TRUE, cor.method = "pearson",
           xlab = "mid point of sleep", ylab = "average nadir")
 ```
-
 
 
 
